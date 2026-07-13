@@ -215,6 +215,7 @@ func (s *SessionLog) BeforeCreate(tx *gorm.DB) error {
 type Workspace struct {
 	ID        string         `gorm:"type:uuid;primaryKey" json:"id"`
 	UserID    string         `gorm:"type:uuid;index" json:"userId"`
+	VaultID   *string        `gorm:"type:uuid;index" json:"vaultId,omitempty"`
 	Name      string         `gorm:"type:varchar(255);not null" json:"name"`
 	Layout    string         `gorm:"type:text;not null" json:"layout"`
 	HostIDs   string         `gorm:"type:text" json:"hostIds,omitempty"`

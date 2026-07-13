@@ -13,6 +13,7 @@ type CreateWorkspaceRequest struct {
 	Name    string   `json:"name" binding:"required"`
 	Layout  string   `json:"layout" binding:"required"`
 	HostIDs []string `json:"hostIds"`
+	VaultID string   `json:"vaultId"`
 }
 
 type UpdateWorkspaceRequest struct {
@@ -28,8 +29,15 @@ func ListWorkspaces(c *gin.Context) {
 		return
 	}
 
+	vaultID := c.Query("vaultId")
+
+	query := db.GetDB().Where("user_id = ?", userID)
+	if vaultID != "" {
+		query = query.Where("vault_id = ?", vaultID)
+	}
+
 	var workspaces []db.Workspace
-	if result := db.GetDB().Where("user_id = ?", userID).Order("created_at DESC").Find(&workspaces); result.Error != nil {
+	if result := query.Order("created_at DESC").Find(&workspaces); result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch workspaces"})
 		return
 	}
@@ -50,6 +58,11 @@ func CreateWorkspace(c *gin.Context) {
 		return
 	}
 
+	var vaultIDPtr *string
+	if req.VaultID != "" {
+		vaultIDPtr = &req.VaultID
+	}
+
 	hostIDsJSON := "[]"
 	if len(req.HostIDs) > 0 {
 		b, _ := json.Marshal(req.HostIDs)
@@ -58,6 +71,7 @@ func CreateWorkspace(c *gin.Context) {
 
 	workspace := db.Workspace{
 		UserID:  userID,
+		VaultID: vaultIDPtr,
 		Name:    req.Name,
 		Layout:  req.Layout,
 		HostIDs: hostIDsJSON,
