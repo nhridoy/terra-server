@@ -78,6 +78,7 @@ func Migrate() error {
 		&Snippet{},
 		&SessionLog{},
 		&Workspace{},
+		&TabGroup{},
 		&Settings{},
 	)
 }

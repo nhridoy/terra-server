@@ -132,6 +132,15 @@ func main() {
 				workspaces.DELETE("/:id", api.DeleteWorkspace)
 			}
 
+			// Quick Preset (tab group) routes
+			tabGroups := protected.Group("/tab-groups")
+			{
+				tabGroups.GET("", api.ListTabGroups)
+				tabGroups.POST("", api.CreateTabGroup)
+				tabGroups.PUT("/:id", api.UpdateTabGroup)
+				tabGroups.DELETE("/:id", api.DeleteTabGroup)
+			}
+
 			// Session routes
 			sessions := protected.Group("/sessions")
 			{

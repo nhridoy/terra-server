@@ -231,6 +231,24 @@ func (w *Workspace) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+type TabGroup struct {
+	ID        string         `gorm:"type:uuid;primaryKey" json:"id"`
+	UserID    string         `gorm:"type:uuid;index" json:"userId"`
+	VaultID   *string        `gorm:"type:uuid;index" json:"vaultId,omitempty"`
+	Name      string         `gorm:"type:varchar(255);not null" json:"name"`
+	Layout    string         `gorm:"type:text;not null" json:"layout"`
+	CreatedAt time.Time      `json:"createdAt"`
+	UpdatedAt time.Time      `json:"updatedAt"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+func (t *TabGroup) BeforeCreate(tx *gorm.DB) error {
+	if t.ID == "" {
+		t.ID = uuid.New().String()
+	}
+	return nil
+}
+
 type Settings struct {
 	ID          string    `gorm:"type:uuid;primaryKey" json:"id"`
 	UserID      string    `gorm:"type:uuid;uniqueIndex;not null" json:"userId"`
