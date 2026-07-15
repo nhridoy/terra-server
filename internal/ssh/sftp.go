@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	posixpath "path"
 	"path/filepath"
 	"time"
 
@@ -46,7 +47,7 @@ func (s *SFTPClient) ListFiles(path string) ([]FileInfo, error) {
 			Mode:    info.Mode().String(),
 			ModTime: info.ModTime().Format(time.RFC3339),
 			IsDir:   info.IsDir(),
-			Path:    filepath.Join(path, info.Name()),
+			Path:    posixpath.Join(path, info.Name()),
 		})
 	}
 
@@ -190,6 +191,26 @@ func (s *SFTPClient) Rename(oldPath, newPath string) error {
 	err := s.client.Rename(oldPath, newPath)
 	if err != nil {
 		return fmt.Errorf("failed to rename: %w", err)
+	}
+	return nil
+}
+
+// CopyFile copies a file from src to dst on the remote host.
+func (s *SFTPClient) CopyFile(src, dst string) error {
+	srcFile, err := s.client.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source: %w", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := s.client.Create(dst)
+	if err != nil {
+		return fmt.Errorf("failed to create destination: %w", err)
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return fmt.Errorf("failed to copy: %w", err)
 	}
 	return nil
 }

@@ -14,7 +14,6 @@ import (
 // Client represents an SSH connection to a remote host
 type Client struct {
 	conn        *ssh.Client
-	sftpClient  *sftp.Client
 	config      *ssh.ClientConfig
 	host        string
 	port        int
@@ -138,12 +137,6 @@ func (c *Client) Disconnect() {
 		session.session.Close()
 	}
 	c.sessions = make(map[string]*Session)
-
-	// Close SFTP client
-	if c.sftpClient != nil {
-		c.sftpClient.Close()
-		c.sftpClient = nil
-	}
 
 	// Close connection
 	if c.conn != nil {
@@ -272,14 +265,11 @@ func (s *Session) Close() error {
 	return s.session.Close()
 }
 
-// GetSFTPClient returns an SFTP client (creates if needed)
+// GetSFTPClient creates a new SFTP client over the shared SSH connection.
+// Each caller gets its own SFTP channel and is responsible for closing it.
 func (c *Client) GetSFTPClient() (*sftp.Client, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.sftpClient != nil {
-		return c.sftpClient, nil
-	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
 	if !c.connected {
 		return nil, fmt.Errorf("not connected")
@@ -290,7 +280,6 @@ func (c *Client) GetSFTPClient() (*sftp.Client, error) {
 		return nil, fmt.Errorf("failed to create SFTP client: %w", err)
 	}
 
-	c.sftpClient = sftpClient
 	return sftpClient, nil
 }
 

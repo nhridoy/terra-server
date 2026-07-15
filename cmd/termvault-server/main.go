@@ -171,8 +171,9 @@ func main() {
 				sftp.POST("/write", api.WriteFile)
 				sftp.POST("/upload", api.UploadFile)
 				sftp.DELETE("/delete", api.DeleteFile)
-				sftp.POST("/move", api.MoveFile)
-				sftp.POST("/mkdir", api.Mkdir)
+			sftp.POST("/move", api.MoveFile)
+			sftp.POST("/mkdir", api.Mkdir)
+			sftp.POST("/copy", api.CopyFile)
 			}
 
 			// Port forwarding routes

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -55,22 +57,47 @@ type MkdirRequest struct {
 	Name       string `json:"name" binding:"required"`
 }
 
-// getSFTPClient gets or creates an SFTP client for a host
-func getSFTPClient(hostID, userID string) (*ssh.SFTPClient, error) {
-	// Validate host belongs to user
-	var host db.Host
-	if result := db.GetDB().Where("id = ? AND user_id = ?", hostID, userID).First(&host); result.Error != nil {
-		return nil, fmt.Errorf("host not found")
-	}
+type CopyFileRequest struct {
+	SrcPath string `json:"srcPath" binding:"required"`
+	DstPath string `json:"dstPath" binding:"required"`
+}
 
-	// Get or create SSH connection
-	config := &ssh.Config{
-		Host:         host.Hostname,
-		Port:         host.Port,
-		Username:     host.Username,
-		Password:     host.Password,
-		KeyBytes:     host.PrivateKey,
-		KeyPassphrase: host.Passphrase,
+// getSFTPClient gets or creates an SFTP client for a host.
+// For direct connects (hostID starts with "direct_"), connection params are read from query params.
+// For saved hosts, params are loaded from the database.
+func getSFTPClient(c *gin.Context, hostID, userID string) (*ssh.SFTPClient, error) {
+	var config *ssh.Config
+
+	if strings.HasPrefix(hostID, "direct_") {
+		// Direct connect: read params from query string
+		host := c.Query("host")
+		if host == "" {
+			return nil, fmt.Errorf("host parameter is required for direct connections")
+		}
+		port := 22
+		if portStr := c.Query("port"); portStr != "" {
+			port, _ = strconv.Atoi(portStr)
+		}
+		config = &ssh.Config{
+			Host:     host,
+			Port:     port,
+			Username: c.Query("username"),
+			Password: c.Query("password"),
+		}
+	} else {
+		// Saved host: load from database
+		var host db.Host
+		if result := db.GetDB().Where("id = ? AND user_id = ?", hostID, userID).First(&host); result.Error != nil {
+			return nil, fmt.Errorf("host not found")
+		}
+		config = &ssh.Config{
+			Host:         host.Hostname,
+			Port:         host.Port,
+			Username:     host.Username,
+			Password:     host.Password,
+			KeyBytes:     host.PrivateKey,
+			KeyPassphrase: host.Passphrase,
+		}
 	}
 
 	client, err := ssh.DefaultManager.GetOrCreate(hostID, config)
@@ -78,7 +105,6 @@ func getSFTPClient(hostID, userID string) (*ssh.SFTPClient, error) {
 		return nil, fmt.Errorf("connection failed: %w", err)
 	}
 
-	// Get SFTP client
 	sftpClient, err := client.GetSFTPClient()
 	if err != nil {
 		return nil, fmt.Errorf("SFTP failed: %w", err)
@@ -96,10 +122,10 @@ func ListFiles(c *gin.Context) {
 	}
 
 	hostID := c.Param("hostId")
-	path := c.DefaultQuery("path", "/")
+	path := normalizeRemotePath(c.DefaultQuery("path", "/"))
 
 	// Get SFTP client
-	sftpClient, err := getSFTPClient(hostID, userID)
+	sftpClient, err := getSFTPClient(c, hostID, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -139,7 +165,7 @@ func ReadFile(c *gin.Context) {
 	}
 
 	hostID := c.Param("hostId")
-	filePath := c.Query("path")
+	filePath := normalizeRemotePath(c.Query("path"))
 
 	if filePath == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "path is required"})
@@ -147,7 +173,7 @@ func ReadFile(c *gin.Context) {
 	}
 
 	// Get SFTP client
-	sftpClient, err := getSFTPClient(hostID, userID)
+	sftpClient, err := getSFTPClient(c, hostID, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -181,7 +207,7 @@ func WriteFile(c *gin.Context) {
 	}
 
 	// Get SFTP client
-	sftpClient, err := getSFTPClient(hostID, userID)
+	sftpClient, err := getSFTPClient(c, hostID, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -189,7 +215,7 @@ func WriteFile(c *gin.Context) {
 	defer sftpClient.Close()
 
 	// Write file
-	if err := sftpClient.WriteFile(req.Path, []byte(req.Content)); err != nil {
+	if err := sftpClient.WriteFile(normalizeRemotePath(req.Path), []byte(req.Content)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write file: " + err.Error()})
 		return
 	}
@@ -215,13 +241,13 @@ func UploadFile(c *gin.Context) {
 	}
 	defer file.Close()
 
-	remotePath := c.PostForm("path")
+	remotePath := normalizeRemotePath(c.PostForm("path"))
 	if remotePath == "" {
 		remotePath = "/"
 	}
 
 	// Get SFTP client
-	sftpClient, err := getSFTPClient(hostID, userID)
+	sftpClient, err := getSFTPClient(c, hostID, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -229,7 +255,7 @@ func UploadFile(c *gin.Context) {
 	defer sftpClient.Close()
 
 	// Create remote file
-	fullPath := filepath.Join(remotePath, header.Filename)
+	fullPath := remotePathJoin(remotePath, header.Filename)
 	data, err := io.ReadAll(file)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read uploaded file"})
@@ -253,7 +279,7 @@ func DeleteFile(c *gin.Context) {
 	}
 
 	hostID := c.Param("hostId")
-	filePath := c.Query("path")
+	filePath := normalizeRemotePath(c.Query("path"))
 
 	if filePath == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "path is required"})
@@ -261,7 +287,7 @@ func DeleteFile(c *gin.Context) {
 	}
 
 	// Get SFTP client
-	sftpClient, err := getSFTPClient(hostID, userID)
+	sftpClient, err := getSFTPClient(c, hostID, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -294,7 +320,7 @@ func MoveFile(c *gin.Context) {
 	}
 
 	// Get SFTP client
-	sftpClient, err := getSFTPClient(hostID, userID)
+	sftpClient, err := getSFTPClient(c, hostID, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -302,7 +328,7 @@ func MoveFile(c *gin.Context) {
 	defer sftpClient.Close()
 
 	// Rename file
-	if err := sftpClient.Rename(req.OldPath, req.NewPath); err != nil {
+	if err := sftpClient.Rename(normalizeRemotePath(req.OldPath), normalizeRemotePath(req.NewPath)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to move file: " + err.Error()})
 		return
 	}
@@ -327,7 +353,7 @@ func Mkdir(c *gin.Context) {
 	}
 
 	// Get SFTP client
-	sftpClient, err := getSFTPClient(hostID, userID)
+	sftpClient, err := getSFTPClient(c, hostID, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -335,13 +361,44 @@ func Mkdir(c *gin.Context) {
 	defer sftpClient.Close()
 
 	// Create directory
-	fullPath := filepath.Join(req.ParentPath, req.Name)
+	fullPath := remotePathJoin(normalizeRemotePath(req.ParentPath), req.Name)
 	if err := sftpClient.Mkdir(fullPath); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create directory: " + err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "directory created"})
+}
+
+// CopyFile copies a file on a remote host
+func CopyFile(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	hostID := c.Param("hostId")
+
+	var req CopyFileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	sftpClient, err := getSFTPClient(c, hostID, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer sftpClient.Close()
+
+	if err := sftpClient.CopyFile(normalizeRemotePath(req.SrcPath), normalizeRemotePath(req.DstPath)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to copy file: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "file copied"})
 }
 
 // Local file operations (for development/testing)
@@ -546,6 +603,17 @@ func LocalMkdir(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "directory created"})
+}
+
+// normalizeRemotePath converts Windows backslash paths to Unix forward slashes.
+// SFTP remote hosts always use forward slashes regardless of the local OS.
+func normalizeRemotePath(p string) string {
+	return strings.ReplaceAll(p, `\`, `/`)
+}
+
+// remotePathJoin joins path segments with forward slashes for remote SFTP paths.
+func remotePathJoin(parts ...string) string {
+	return strings.Join(parts, "/")
 }
 
 // Helper functions
