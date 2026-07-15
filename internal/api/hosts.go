@@ -190,7 +190,11 @@ func UpdateHost(c *gin.Context) {
 		host.Username = *req.Username
 	}
 	if req.GroupID != nil {
-		host.GroupID = req.GroupID
+		if *req.GroupID == "" {
+			host.GroupID = nil
+		} else {
+			host.GroupID = req.GroupID
+		}
 	}
 	if req.Tags != nil {
 		tagsBytes, _ := json.Marshal(req.Tags)

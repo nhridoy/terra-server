@@ -105,7 +105,11 @@ func UpdateGroup(c *gin.Context) {
 		group.Name = *req.Name
 	}
 	if req.ParentID != nil {
-		group.ParentID = req.ParentID
+		if *req.ParentID == "" {
+			group.ParentID = nil
+		} else {
+			group.ParentID = req.ParentID
+		}
 	}
 
 	if result := db.GetDB().Save(&group); result.Error != nil {
@@ -130,6 +134,11 @@ func DeleteGroup(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "group not found"})
 		return
 	}
+
+	// Cascade: null out hosts assigned to this group
+	db.GetDB().Model(&db.Host{}).Where("group_id = ?", groupID).Update("group_id", nil)
+	// Reparent child groups to top-level
+	db.GetDB().Model(&db.Group{}).Where("parent_id = ?", groupID).Update("parent_id", nil)
 
 	if result := db.GetDB().Delete(&group); result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete group"})
