@@ -168,6 +168,28 @@ func (s *SFTPClient) DeleteFile(path string) error {
 	return nil
 }
 
+// RemoveAll recursively deletes a file or directory tree.
+func (s *SFTPClient) RemoveAll(path string) error {
+	info, err := s.client.Stat(path)
+	if err != nil {
+		return fmt.Errorf("failed to stat path: %w", err)
+	}
+	if !info.IsDir() {
+		return s.client.Remove(path)
+	}
+	entries, err := s.client.ReadDir(path)
+	if err != nil {
+		return fmt.Errorf("failed to read directory: %w", err)
+	}
+	for _, entry := range entries {
+		entryPath := posixpath.Join(path, entry.Name())
+		if err := s.RemoveAll(entryPath); err != nil {
+			return fmt.Errorf("failed to remove %s: %w", entryPath, err)
+		}
+	}
+	return s.client.RemoveDirectory(path)
+}
+
 // Mkdir creates a directory
 func (s *SFTPClient) Mkdir(path string) error {
 	err := s.client.MkdirAll(path)
@@ -212,6 +234,58 @@ func (s *SFTPClient) CopyFile(src, dst string) error {
 	if _, err := io.Copy(dstFile, srcFile); err != nil {
 		return fmt.Errorf("failed to copy: %w", err)
 	}
+	return nil
+}
+
+// CrossCopyFrom streams a file from another SFTPClient (source) into this client (destination).
+func (s *SFTPClient) CrossCopyFrom(src *SFTPClient, srcPath, dstPath string) error {
+	srcFile, err := src.client.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := s.client.Create(dstPath)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return fmt.Errorf("failed to stream file: %w", err)
+	}
+	return nil
+}
+
+// CrossCopyDirFrom recursively copies a file or directory from another SFTPClient (source) into this client (destination).
+func (s *SFTPClient) CrossCopyDirFrom(src *SFTPClient, srcPath, dstPath string) error {
+	srcInfo, err := src.client.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat source path: %w", err)
+	}
+
+	if !srcInfo.IsDir() {
+		return s.CrossCopyFrom(src, srcPath, dstPath)
+	}
+
+	if err := s.client.MkdirAll(dstPath); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	entries, err := src.client.ReadDir(srcPath)
+	if err != nil {
+		return fmt.Errorf("failed to read source directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		srcEntryPath := posixpath.Join(srcPath, entry.Name())
+		dstEntryPath := posixpath.Join(dstPath, entry.Name())
+
+		if err := s.CrossCopyDirFrom(src, srcEntryPath, dstEntryPath); err != nil {
+			return fmt.Errorf("failed to copy %s: %w", entry.Name(), err)
+		}
+	}
+
 	return nil
 }
 

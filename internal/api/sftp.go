@@ -62,27 +62,40 @@ type CopyFileRequest struct {
 	DstPath string `json:"dstPath" binding:"required"`
 }
 
+type CrossCopyRequest struct {
+	SrcHostID string `json:"srcHostId" binding:"required"`
+	SrcPath   string `json:"srcPath" binding:"required"`
+	DstHostID string `json:"dstHostId" binding:"required"`
+	DstPath   string `json:"dstPath" binding:"required"`
+}
+
 // getSFTPClient gets or creates an SFTP client for a host.
 // For direct connects (hostID starts with "direct_"), connection params are read from query params.
 // For saved hosts, params are loaded from the database.
 func getSFTPClient(c *gin.Context, hostID, userID string) (*ssh.SFTPClient, error) {
+	return getSFTPClientWithPrefix(c, hostID, userID, "")
+}
+
+// getSFTPClientWithPrefix works like getSFTPClient but reads direct-connect params
+// with a key prefix (e.g. "src_" reads "srcHost", "srcPort", "srcUsername").
+func getSFTPClientWithPrefix(c *gin.Context, hostID, userID, prefix string) (*ssh.SFTPClient, error) {
 	var config *ssh.Config
 
 	if strings.HasPrefix(hostID, "direct_") {
-		// Direct connect: read params from query string
-		host := c.Query("host")
+		// Direct connect: read params from query string with optional prefix
+		host := c.Query(prefix + "host")
 		if host == "" {
 			return nil, fmt.Errorf("host parameter is required for direct connections")
 		}
 		port := 22
-		if portStr := c.Query("port"); portStr != "" {
+		if portStr := c.Query(prefix + "port"); portStr != "" {
 			port, _ = strconv.Atoi(portStr)
 		}
 		config = &ssh.Config{
 			Host:     host,
 			Port:     port,
-			Username: c.Query("username"),
-			Password: c.Query("password"),
+			Username: c.Query(prefix + "username"),
+			Password: c.Query(prefix + "password"),
 		}
 	} else {
 		// Saved host: load from database
@@ -399,6 +412,84 @@ func CopyFile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "file copied"})
+}
+
+// CrossCopy copies a file between two different hosts by streaming from source to destination.
+func CrossCopy(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req CrossCopyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	srcClient, err := getSFTPClientWithPrefix(c, req.SrcHostID, userID, "src_")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "source connection failed: " + err.Error()})
+		return
+	}
+	defer srcClient.Close()
+
+	dstClient, err := getSFTPClientWithPrefix(c, req.DstHostID, userID, "dst_")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "destination connection failed: " + err.Error()})
+		return
+	}
+	defer dstClient.Close()
+
+	if err := dstClient.CrossCopyDirFrom(srcClient, normalizeRemotePath(req.SrcPath), normalizeRemotePath(req.DstPath)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "cross-host copy failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "file copied"})
+}
+
+// CrossMove moves a file between two different hosts by streaming from source to destination, then deleting source.
+func CrossMove(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req CrossCopyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	srcClient, err := getSFTPClientWithPrefix(c, req.SrcHostID, userID, "src_")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "source connection failed: " + err.Error()})
+		return
+	}
+	defer srcClient.Close()
+
+	dstClient, err := getSFTPClientWithPrefix(c, req.DstHostID, userID, "dst_")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "destination connection failed: " + err.Error()})
+		return
+	}
+	defer dstClient.Close()
+
+	if err := dstClient.CrossCopyDirFrom(srcClient, normalizeRemotePath(req.SrcPath), normalizeRemotePath(req.DstPath)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "cross-host move copy failed: " + err.Error()})
+		return
+	}
+
+	// Delete source file/directory after successful copy
+	if err := srcClient.RemoveAll(normalizeRemotePath(req.SrcPath)); err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "file moved but source delete failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "file moved"})
 }
 
 // Local file operations (for development/testing)

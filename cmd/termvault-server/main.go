@@ -176,6 +176,13 @@ func main() {
 			sftp.POST("/copy", api.CopyFile)
 			}
 
+			// Cross-host SFTP operations
+			sftpCross := protected.Group("/sftp")
+			{
+				sftpCross.POST("/cross-copy", api.CrossCopy)
+				sftpCross.POST("/cross-move", api.CrossMove)
+			}
+
 			// Port forwarding routes
 			portForward := protected.Group("/port-forward")
 			{
