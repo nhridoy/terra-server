@@ -267,3 +267,28 @@ func (s *Settings) BeforeCreate(tx *gorm.DB) error {
 	}
 	return nil
 }
+
+type SyncState struct {
+	ID         string    `gorm:"type:uuid;primaryKey" json:"id"`
+	UserID     string    `gorm:"type:uuid;index;not null" json:"userId"`
+	DeviceID   string    `gorm:"type:varchar(255);not null" json:"deviceId"`
+	LastSyncAt time.Time `json:"lastSyncAt"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+func (s *SyncState) BeforeCreate(tx *gorm.DB) error {
+	if s.ID == "" {
+		s.ID = uuid.New().String()
+	}
+	return nil
+}
+
+type SyncTracking struct {
+	TableName string    `gorm:"type:varchar(100);primaryKey" json:"tableName"`
+	RecordID  string    `gorm:"type:varchar(255);primaryKey" json:"recordId"`
+	UserID    string    `gorm:"type:uuid;index;not null" json:"userId"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	DeviceID  string    `gorm:"type:varchar(255);not null" json:"deviceId"`
+	IsDeleted bool      `gorm:"default:false" json:"isDeleted"`
+}

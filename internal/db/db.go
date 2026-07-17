@@ -80,6 +80,8 @@ func Migrate() error {
 		&Workspace{},
 		&TabGroup{},
 		&Settings{},
+		&SyncState{},
+		&SyncTracking{},
 	)
 }
 

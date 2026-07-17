@@ -202,6 +202,14 @@ func main() {
 				localFiles.DELETE("/delete", api.LocalDeleteFile)
 				localFiles.POST("/mkdir", api.LocalMkdir)
 			}
+
+			// Sync routes
+			sync := protected.Group("/sync")
+			{
+				sync.POST("/push", api.SyncPush)
+				sync.GET("/pull", api.SyncPull)
+				sync.GET("/full", api.SyncFull)
+			}
 		}
 	}
 
