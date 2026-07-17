@@ -113,14 +113,26 @@ func getSFTPClientWithPrefix(c *gin.Context, hostID, userID, prefix string) (*ss
 		}
 	}
 
-	client, err := ssh.DefaultManager.GetOrCreate(hostID, config)
+	connID := userID + ":" + hostID
+
+	client, err := ssh.DefaultManager.GetOrCreate(connID, config)
 	if err != nil {
 		return nil, fmt.Errorf("connection failed: %w", err)
 	}
 
 	sftpClient, err := client.GetSFTPClient()
 	if err != nil {
-		return nil, fmt.Errorf("SFTP failed: %w", err)
+		// Connection may be stale (e.g. remote server closed idle TCP).
+		// Disconnect and retry once with a fresh connection.
+		ssh.DefaultManager.Disconnect(connID)
+		client, err = ssh.DefaultManager.Connect(connID, config)
+		if err != nil {
+			return nil, fmt.Errorf("connection failed: %w", err)
+		}
+		sftpClient, err = client.GetSFTPClient()
+		if err != nil {
+			return nil, fmt.Errorf("SFTP failed: %w", err)
+		}
 	}
 
 	return ssh.NewSFTPClient(sftpClient), nil

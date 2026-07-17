@@ -73,7 +73,7 @@ func CreatePortForward(c *gin.Context) {
 		KeyPassphrase: host.Passphrase,
 	}
 
-	client, err := ssh.DefaultManager.GetOrCreate(req.HostID, config)
+	client, err := ssh.DefaultManager.GetOrCreate(userID+":"+req.HostID, config)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "connection failed: " + err.Error()})
 		return

@@ -6,16 +6,22 @@ import (
 	"time"
 )
 
+// Default idle timeout for SSH connections. Connections unused longer than
+// this are considered stale and will be replaced on next use.
+const DefaultIdleTimeout = 15 * time.Minute
+
 // Manager manages all SSH connections
 type Manager struct {
 	connections map[string]*Client
 	mu          sync.RWMutex
+	IdleTimeout time.Duration
 }
 
 // NewManager creates a new connection manager
 func NewManager() *Manager {
 	return &Manager{
 		connections: make(map[string]*Client),
+		IdleTimeout: DefaultIdleTimeout,
 	}
 }
 
@@ -67,15 +73,28 @@ func (m *Manager) NewConnection(id string, config *Config) (*Client, error) {
 	return client, nil
 }
 
-// Get returns a connection by ID
+// Get returns a connection by ID if it is still connected and within the idle timeout.
 func (m *Manager) Get(id string) (*Client, bool) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	client, exists := m.connections[id]
+	m.mu.RUnlock()
+
 	if !exists || !client.IsConnected() {
 		return nil, false
 	}
+
+	// Check if connection has been idle beyond the timeout
+	if m.IdleTimeout > 0 && time.Since(client.LastUsed()) > m.IdleTimeout {
+		m.mu.Lock()
+		// Double-check it hasn't been replaced since we released the read lock
+		if c, ok := m.connections[id]; ok && c == client {
+			client.Disconnect()
+			delete(m.connections, id)
+		}
+		m.mu.Unlock()
+		return nil, false
+	}
+
 	return client, true
 }
 
@@ -115,13 +134,18 @@ func (m *Manager) List() []string {
 	return ids
 }
 
-// Cleanup removes stale connections
+// Cleanup removes stale and idle connections
 func (m *Manager) Cleanup() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for id, client := range m.connections {
 		if !client.IsConnected() {
+			delete(m.connections, id)
+			continue
+		}
+		if m.IdleTimeout > 0 && time.Since(client.LastUsed()) > m.IdleTimeout {
+			client.Disconnect()
 			delete(m.connections, id)
 		}
 	}

@@ -22,6 +22,7 @@ type Client struct {
 	keyBytes    []byte
 	keyPassphrase string
 	connected   bool
+	lastUsed    time.Time
 	mu          sync.RWMutex
 	sessions    map[string]*Session
 }
@@ -123,6 +124,7 @@ func (c *Client) Connect() error {
 
 	c.conn = conn
 	c.connected = true
+	c.lastUsed = time.Now()
 
 	return nil
 }
@@ -269,18 +271,31 @@ func (s *Session) Close() error {
 // Each caller gets its own SFTP channel and is responsible for closing it.
 func (c *Client) GetSFTPClient() (*sftp.Client, error) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	if !c.connected {
+		c.mu.RUnlock()
 		return nil, fmt.Errorf("not connected")
 	}
+	conn := c.conn
+	c.mu.RUnlock()
 
-	sftpClient, err := sftp.NewClient(c.conn)
+	sftpClient, err := sftp.NewClient(conn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SFTP client: %w", err)
 	}
 
+	// Track last successful use for idle timeout
+	c.mu.Lock()
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
+
 	return sftpClient, nil
+}
+
+// LastUsed returns the time this connection was last actively used.
+func (c *Client) LastUsed() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastUsed
 }
 
 // StartPortForward starts a port forwarding rule
