@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/rand"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -32,6 +33,47 @@ func generateRandomBytes(n int) ([]byte, error) {
 
 func bytesToHex(b []byte) string {
 	return auth.BytesToHex(b)
+}
+
+// ensureDefaultVaults creates the Personal and Team system vaults for a user
+// if they do not already exist. It is idempotent and safe to call on every
+// request; the unique (user_id, name) constraint handles concurrent races.
+func ensureDefaultVaults(userID string) {
+	defaults := []db.Vault{
+		{
+			UserID:        userID,
+			Name:          "Personal",
+			Description:   "Personal vault for individual use",
+			IsDefault:     true,
+			IsSystem:      true,
+			EncryptedData: "",
+			IV:            "",
+			Salt:          "",
+		},
+		{
+			UserID:        userID,
+			Name:          "Team",
+			Description:   "Team vault for shared resources",
+			IsDefault:     false,
+			IsSystem:      true,
+			EncryptedData: "",
+			IV:            "",
+			Salt:          "",
+		},
+	}
+
+	for _, v := range defaults {
+		var count int64
+		db.GetDB().Model(&db.Vault{}).
+			Where("user_id = ? AND name = ?", userID, v.Name).
+			Count(&count)
+		if count > 0 {
+			continue
+		}
+		if err := db.GetDB().Create(&v).Error; err != nil {
+			log.Printf("Failed to create default vault '%s' for user %s: %v", v.Name, userID, err)
+		}
+	}
 }
 
 // Register handles user registration

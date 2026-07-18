@@ -123,13 +123,14 @@ func SyncFull(c *gin.Context) {
 		TableName string
 		Query     string
 	}{
-		{"vaults", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'name', name, 'description', description, 'is_default', is_default, 'encrypted_data', encrypted_data, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM vaults WHERE user_id = ?"},
-		{"hosts", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'group_id', group_id, 'name', name, 'hostname', hostname, 'address', address, 'port', port, 'username', username, 'auth_method', auth_method, 'tags', tags, 'color', color, 'icon', icon, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM hosts WHERE user_id = ?"},
-		{"groups", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'parent_id', parent_id, 'name', name, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM groups WHERE user_id = ?"},
-		{"keychain", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'description', description, 'key_type', key_type, 'public_key', public_key, 'encrypted_private_key', encrypted_private_key, 'fingerprint', fingerprint, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM keychain WHERE user_id = ?"},
-		{"snippets", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'command', command, 'description', description, 'tags', tags, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM snippets WHERE user_id = ?"},
-		{"workspaces", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'host_ids', host_ids, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM workspaces WHERE user_id = ?"},
-		{"tab_groups", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM tab_groups WHERE user_id = ?"},
+		{"vaults", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'name', name, 'description', description, 'is_default', is_default, 'is_system', is_system, 'encrypted_data', encrypted_data, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM vaults WHERE user_id = ? AND deleted_at IS NULL"},
+		{"hosts", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'group_id', group_id, 'name', name, 'hostname', hostname, 'address', address, 'port', port, 'username', username, 'auth_method', auth_method, 'tags', tags, 'color', color, 'icon', icon, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM hosts WHERE user_id = ? AND deleted_at IS NULL"},
+		{"groups", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'parent_id', parent_id, 'name', name, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM groups WHERE user_id = ? AND deleted_at IS NULL"},
+		{"keychain", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'description', description, 'key_type', key_type, 'public_key', public_key, 'encrypted_private_key', encrypted_private_key, 'fingerprint', fingerprint, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM keychain WHERE user_id = ? AND deleted_at IS NULL"},
+		{"snippets", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'command', command, 'description', description, 'tags', tags, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM snippets WHERE user_id = ? AND deleted_at IS NULL"},
+		{"workspaces", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'host_ids', host_ids, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM workspaces WHERE user_id = ? AND deleted_at IS NULL"},
+		{"tab_groups", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM tab_groups WHERE user_id = ? AND deleted_at IS NULL"},
+		{"settings", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'theme', theme, 'font_family', font_family, 'font_size', font_size, 'cursor_style', cursor_style, 'keybindings', keybindings, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM settings WHERE user_id = ? AND deleted_at IS NULL"},
 	}
 
 	for _, q := range queries {
@@ -147,6 +148,19 @@ func SyncFull(c *gin.Context) {
 		}
 	}
 
+	var deletedTracking []db.SyncTracking
+	db.DB.Where("user_id = ? AND is_deleted = ?", userID, true).Find(&deletedTracking)
+	for _, t := range deletedTracking {
+		records = append(records, SyncRecord{
+			TableName: t.TableName,
+			RecordID:  t.RecordID,
+			Data:      json.RawMessage("{}"),
+			UpdatedAt: t.UpdatedAt,
+			DeviceID:  t.DeviceID,
+			IsDeleted: true,
+		})
+	}
+
 	c.JSON(http.StatusOK, SyncPullResponse{
 		Records:   records,
 		SyncToken: time.Now().Format(time.RFC3339),
@@ -155,6 +169,21 @@ func SyncFull(c *gin.Context) {
 }
 
 func upsertRecord(userID string, record SyncRecord) {
+	if record.IsDeleted {
+		deleteRecord(record.TableName, record.RecordID, userID)
+
+		tracking := db.SyncTracking{
+			TableName: record.TableName,
+			RecordID:  record.RecordID,
+			UserID:    userID,
+			UpdatedAt: record.UpdatedAt,
+			DeviceID:  record.DeviceID,
+			IsDeleted: true,
+		}
+		db.DB.Save(&tracking)
+		return
+	}
+
 	switch record.TableName {
 	case "vaults":
 		var vault db.Vault
@@ -218,6 +247,24 @@ func upsertRecord(userID string, record SyncRecord) {
 		}
 		tg.UserID = userID
 		db.DB.Save(&tg)
+
+	case "settings":
+		var s db.Settings
+		if err := json.Unmarshal(record.Data, &s); err != nil {
+			log.Printf("Failed to unmarshal settings: %v", err)
+			return
+		}
+		s.UserID = userID
+		db.DB.Save(&s)
+
+	case "session_logs":
+		var sl db.SessionLog
+		if err := json.Unmarshal(record.Data, &sl); err != nil {
+			log.Printf("Failed to unmarshal session log: %v", err)
+			return
+		}
+		sl.UserID = userID
+		db.DB.Save(&sl)
 	}
 
 	tracking := db.SyncTracking{
@@ -229,6 +276,29 @@ func upsertRecord(userID string, record SyncRecord) {
 		IsDeleted: record.IsDeleted,
 	}
 	db.DB.Save(&tracking)
+}
+
+func deleteRecord(tableName, recordID, userID string) {
+	switch tableName {
+	case "vaults":
+		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Vault{})
+	case "hosts":
+		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Host{})
+	case "groups":
+		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Group{})
+	case "keychain":
+		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Keychain{})
+	case "snippets":
+		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Snippet{})
+	case "workspaces":
+		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Workspace{})
+	case "tab_groups":
+		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.TabGroup{})
+	case "settings":
+		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Settings{})
+	case "session_logs":
+		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.SessionLog{})
+	}
 }
 
 func fetchFullRecord(tableName, recordID, userID string) json.RawMessage {
@@ -281,6 +351,20 @@ func fetchFullRecord(tableName, recordID, userID string) json.RawMessage {
 			return json.RawMessage("{}")
 		}
 		data, _ := json.Marshal(tg)
+		return data
+	case "settings":
+		var s db.Settings
+		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&s).Error; err != nil {
+			return json.RawMessage("{}")
+		}
+		data, _ := json.Marshal(s)
+		return data
+	case "session_logs":
+		var sl db.SessionLog
+		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&sl).Error; err != nil {
+			return json.RawMessage("{}")
+		}
+		data, _ := json.Marshal(sl)
 		return data
 	}
 	return json.RawMessage("{}")

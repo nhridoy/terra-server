@@ -191,6 +191,9 @@ func ValidateClientProof(email string, password string, salt []byte, A *big.Int,
 
 // Helper functions
 func HexToBytes(hexStr string) ([]byte, error) {
+	if len(hexStr)%2 != 0 {
+		hexStr = "0" + hexStr
+	}
 	return hex.DecodeString(hexStr)
 }
 
@@ -199,7 +202,11 @@ func BytesToHex(bytes []byte) string {
 }
 
 func BigIntToHex(n *big.Int) string {
-	return n.Text(16)
+	h := n.Text(16)
+	if len(h)%2 != 0 {
+		h = "0" + h
+	}
+	return h
 }
 
 func HexToBigInt(hexStr string) *big.Int {

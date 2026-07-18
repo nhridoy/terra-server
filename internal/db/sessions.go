@@ -9,15 +9,15 @@ import (
 // CommandLog represents a logged command
 type CommandLog struct {
 	ID         uint           `gorm:"primaryKey" json:"id"`
-	SessionID  string         `gorm:"index;not null" json:"sessionId"`
+	SessionID  string         `gorm:"index;not null" json:"session_id"`
 	Command    string         `gorm:"type:text;not null" json:"command"`
 	Output     string         `gorm:"type:text" json:"output"`
-	ExitCode   int            `json:"exitCode"`
-	ExecutedAt time.Time      `gorm:"not null" json:"executedAt"`
+	ExitCode   int            `json:"exit_code"`
+	ExecutedAt time.Time      `gorm:"not null" json:"executed_at"`
 	Duration   time.Duration  `json:"duration"`
-	CreatedAt  time.Time      `json:"createdAt"`
-	UpdatedAt  time.Time      `json:"updatedAt"`
-	DeletedAt  gorm.DeletedAt `gorm:"index" json:"deletedAt"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	DeletedAt  gorm.DeletedAt `gorm:"index" json:"deleted_at"`
 }
 
 // SessionManager manages session logging
