@@ -285,6 +285,8 @@ func deleteRecord(tableName, recordID, userID string) {
 	case "hosts":
 		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Host{})
 	case "groups":
+		db.DB.Model(&db.Group{}).Where("parent_id = ?", recordID).Update("parent_id", nil)
+		db.DB.Model(&db.Host{}).Where("group_id = ?", recordID).Update("group_id", nil)
 		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Group{})
 	case "keychain":
 		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Keychain{})
