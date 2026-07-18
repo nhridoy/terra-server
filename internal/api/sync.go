@@ -11,12 +11,12 @@ import (
 )
 
 type SyncRecord struct {
-	TableName string    `json:"tableName"`
-	RecordID  string    `json:"recordId"`
-	Data      string    `json:"data"`
-	UpdatedAt time.Time `json:"updatedAt"`
-	DeviceID  string    `json:"deviceId"`
-	IsDeleted bool      `json:"isDeleted,omitempty"`
+	TableName string          `json:"tableName"`
+	RecordID  string          `json:"recordId"`
+	Data      json.RawMessage `json:"data"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+	DeviceID  string          `json:"deviceId"`
+	IsDeleted bool            `json:"isDeleted,omitempty"`
 }
 
 type SyncPushRequest struct {
@@ -113,39 +113,35 @@ func SyncFull(c *gin.Context) {
 	userID := c.GetString("userId")
 	records := []SyncRecord{}
 
-	type tableRow struct {
-		TableName string
+	type scanRow struct {
 		ID        string
+		UpdatedAt string
 		Data      string
-		UpdatedAt time.Time
 	}
 
 	queries := []struct {
 		TableName string
 		Query     string
 	}{
-		{"vaults", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'name', name, 'description', description, 'is_default', is_default, 'encrypted_data', encrypted_data, 'created_at', created_at, 'updated_at', updated_at) AS data FROM vaults WHERE user_id = ?"},
-		{"hosts", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'group_id', group_id, 'name', name, 'hostname', hostname, 'address', address, 'port', port, 'username', username, 'auth_method', auth_method, 'tags', tags, 'color', color, 'icon', icon, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', updated_at) AS data FROM hosts WHERE user_id = ?"},
+		{"vaults", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'name', name, 'description', description, 'is_default', is_default, 'encrypted_data', encrypted_data, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM vaults WHERE user_id = ?"},
+		{"hosts", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'group_id', group_id, 'name', name, 'hostname', hostname, 'address', address, 'port', port, 'username', username, 'auth_method', auth_method, 'tags', tags, 'color', color, 'icon', icon, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM hosts WHERE user_id = ?"},
 		{"groups", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'parent_id', parent_id, 'name', name, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM groups WHERE user_id = ?"},
 		{"keychain", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'description', description, 'key_type', key_type, 'public_key', public_key, 'encrypted_private_key', encrypted_private_key, 'fingerprint', fingerprint, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM keychain WHERE user_id = ?"},
-		{"snippets", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'command', command, 'description', description, 'tags', tags, 'created_at', created_at, 'updated_at', updated_at) AS data FROM snippets WHERE user_id = ?"},
-		{"workspaces", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'host_ids', host_ids, 'created_at', created_at, 'updated_at', updated_at) AS data FROM workspaces WHERE user_id = ?"},
-		{"tab_groups", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'created_at', created_at, 'updated_at', updated_at) AS data FROM tab_groups WHERE user_id = ?"},
+		{"snippets", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'command', command, 'description', description, 'tags', tags, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM snippets WHERE user_id = ?"},
+		{"workspaces", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'host_ids', host_ids, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM workspaces WHERE user_id = ?"},
+		{"tab_groups", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM tab_groups WHERE user_id = ?"},
 	}
 
 	for _, q := range queries {
-		var rows []struct {
-			ID        string
-			UpdatedAt time.Time
-			Data      string
-		}
+		var rows []scanRow
 		db.DB.Raw(q.Query, userID).Scan(&rows)
 		for _, row := range rows {
+			parsedTime := parseDateTime(row.UpdatedAt)
 			records = append(records, SyncRecord{
 				TableName: q.TableName,
 				RecordID:  row.ID,
-				Data:      row.Data,
-				UpdatedAt: row.UpdatedAt,
+				Data:      json.RawMessage(row.Data),
+				UpdatedAt: parsedTime,
 				IsDeleted: false,
 			})
 		}
@@ -160,41 +156,63 @@ func SyncFull(c *gin.Context) {
 
 func upsertRecord(userID string, record SyncRecord) {
 	switch record.TableName {
+	case "vaults":
+		var vault db.Vault
+		if err := json.Unmarshal(record.Data, &vault); err != nil {
+			log.Printf("Failed to unmarshal vault: %v", err)
+			return
+		}
+		vault.UserID = userID
+		db.DB.Save(&vault)
+
 	case "hosts":
 		var host db.Host
-		if err := json.Unmarshal([]byte(record.Data), &host); err != nil {
+		if err := json.Unmarshal(record.Data, &host); err != nil {
 			log.Printf("Failed to unmarshal host: %v", err)
 			return
 		}
 		host.UserID = userID
 		db.DB.Save(&host)
+
 	case "groups":
 		var group db.Group
-		if err := json.Unmarshal([]byte(record.Data), &group); err != nil {
+		if err := json.Unmarshal(record.Data, &group); err != nil {
 			log.Printf("Failed to unmarshal group: %v", err)
 			return
 		}
 		group.UserID = userID
 		db.DB.Save(&group)
+
+	case "keychain":
+		var kc db.Keychain
+		if err := json.Unmarshal(record.Data, &kc); err != nil {
+			log.Printf("Failed to unmarshal keychain entry: %v", err)
+			return
+		}
+		kc.UserID = userID
+		db.DB.Save(&kc)
+
 	case "snippets":
 		var snippet db.Snippet
-		if err := json.Unmarshal([]byte(record.Data), &snippet); err != nil {
+		if err := json.Unmarshal(record.Data, &snippet); err != nil {
 			log.Printf("Failed to unmarshal snippet: %v", err)
 			return
 		}
 		snippet.UserID = userID
 		db.DB.Save(&snippet)
+
 	case "workspaces":
 		var ws db.Workspace
-		if err := json.Unmarshal([]byte(record.Data), &ws); err != nil {
+		if err := json.Unmarshal(record.Data, &ws); err != nil {
 			log.Printf("Failed to unmarshal workspace: %v", err)
 			return
 		}
 		ws.UserID = userID
 		db.DB.Save(&ws)
+
 	case "tab_groups":
 		var tg db.TabGroup
-		if err := json.Unmarshal([]byte(record.Data), &tg); err != nil {
+		if err := json.Unmarshal(record.Data, &tg); err != nil {
 			log.Printf("Failed to unmarshal tab group: %v", err)
 			return
 		}
@@ -213,43 +231,76 @@ func upsertRecord(userID string, record SyncRecord) {
 	db.DB.Save(&tracking)
 }
 
-func fetchFullRecord(tableName, recordID, userID string) string {
+func fetchFullRecord(tableName, recordID, userID string) json.RawMessage {
 	switch tableName {
+	case "vaults":
+		var vault db.Vault
+		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&vault).Error; err != nil {
+			return json.RawMessage("{}")
+		}
+		data, _ := json.Marshal(vault)
+		return data
 	case "hosts":
 		var host db.Host
 		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&host).Error; err != nil {
-			return "{}"
+			return json.RawMessage("{}")
 		}
 		data, _ := json.Marshal(host)
-		return string(data)
+		return data
 	case "groups":
 		var group db.Group
 		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&group).Error; err != nil {
-			return "{}"
+			return json.RawMessage("{}")
 		}
 		data, _ := json.Marshal(group)
-		return string(data)
+		return data
+	case "keychain":
+		var kc db.Keychain
+		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&kc).Error; err != nil {
+			return json.RawMessage("{}")
+		}
+		data, _ := json.Marshal(kc)
+		return data
 	case "snippets":
 		var snippet db.Snippet
 		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&snippet).Error; err != nil {
-			return "{}"
+			return json.RawMessage("{}")
 		}
 		data, _ := json.Marshal(snippet)
-		return string(data)
+		return data
 	case "workspaces":
 		var ws db.Workspace
 		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&ws).Error; err != nil {
-			return "{}"
+			return json.RawMessage("{}")
 		}
 		data, _ := json.Marshal(ws)
-		return string(data)
+		return data
 	case "tab_groups":
 		var tg db.TabGroup
 		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&tg).Error; err != nil {
-			return "{}"
+			return json.RawMessage("{}")
 		}
 		data, _ := json.Marshal(tg)
-		return string(data)
+		return data
 	}
-	return "{}"
+	return json.RawMessage("{}")
+}
+
+func parseDateTime(s string) time.Time {
+	formats := []string{
+		"2006-01-02 15:04:05.9999999-07:00",
+		"2006-01-02 15:04:05.9999999+00:00",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05+00:00",
+		"2006-01-02T15:04:05.9999999Z",
+		"2006-01-02T15:04:05Z",
+		time.RFC3339,
+		time.RFC3339Nano,
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t
+		}
+	}
+	return time.Now()
 }
