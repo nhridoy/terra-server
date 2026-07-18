@@ -124,11 +124,13 @@ func SyncFull(c *gin.Context) {
 		TableName string
 		Query     string
 	}{
-		{"hosts", "SELECT id, updated_at, json_object('id', id, 'userId', user_id, 'vaultId', vault_id, 'groupId', group_id, 'name', name, 'hostname', hostname, 'address', address, 'port', port, 'username', username, 'authMethod', auth_method, 'tags', tags, 'color', color, 'icon', icon, 'sortOrder', sort_order, 'createdAt', created_at, 'updatedAt', updated_at) AS data FROM hosts WHERE user_id = ?"},
-		{"groups", "SELECT id, updated_at, json_object('id', id, 'userId', user_id, 'vaultId', vault_id, 'parentId', parent_id, 'name', name, 'sortOrder', sort_order, 'createdAt', created_at) AS data FROM groups WHERE user_id = ?"},
-		{"snippets", "SELECT id, updated_at, json_object('id', id, 'userId', user_id, 'vaultId', vault_id, 'name', name, 'command', command, 'description', description, 'tags', tags, 'createdAt', created_at) AS data FROM snippets WHERE user_id = ?"},
-		{"workspaces", "SELECT id, updated_at, json_object('id', id, 'userId', user_id, 'vaultId', vault_id, 'name', name, 'layout', layout, 'hostIds', host_ids, 'createdAt', created_at, 'updatedAt', updated_at) AS data FROM workspaces WHERE user_id = ?"},
-		{"tab_groups", "SELECT id, updated_at, json_object('id', id, 'userId', user_id, 'vaultId', vault_id, 'name', name, 'layout', layout, 'createdAt', created_at, 'updatedAt', updated_at) AS data FROM tab_groups WHERE user_id = ?"},
+		{"vaults", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'name', name, 'description', description, 'is_default', is_default, 'encrypted_data', encrypted_data, 'created_at', created_at, 'updated_at', updated_at) AS data FROM vaults WHERE user_id = ?"},
+		{"hosts", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'group_id', group_id, 'name', name, 'hostname', hostname, 'address', address, 'port', port, 'username', username, 'auth_method', auth_method, 'tags', tags, 'color', color, 'icon', icon, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', updated_at) AS data FROM hosts WHERE user_id = ?"},
+		{"groups", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'parent_id', parent_id, 'name', name, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', updated_at) AS data FROM groups WHERE user_id = ?"},
+		{"keychain", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'description', description, 'key_type', key_type, 'public_key', public_key, 'encrypted_private_key', encrypted_private_key, 'fingerprint', fingerprint, 'created_at', created_at, 'updated_at', updated_at) AS data FROM keychain WHERE user_id = ?"},
+		{"snippets", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'command', command, 'description', description, 'tags', tags, 'created_at', created_at, 'updated_at', updated_at) AS data FROM snippets WHERE user_id = ?"},
+		{"workspaces", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'host_ids', host_ids, 'created_at', created_at, 'updated_at', updated_at) AS data FROM workspaces WHERE user_id = ?"},
+		{"tab_groups", "SELECT id, updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'created_at', created_at, 'updated_at', updated_at) AS data FROM tab_groups WHERE user_id = ?"},
 	}
 
 	for _, q := range queries {
