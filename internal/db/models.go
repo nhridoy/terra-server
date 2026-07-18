@@ -121,6 +121,7 @@ type Group struct {
 	Name      string         `gorm:"type:varchar(255);not null" json:"name"`
 	SortOrder int            `gorm:"default:0" json:"sortOrder"`
 	CreatedAt time.Time      `json:"createdAt"`
+	UpdatedAt time.Time      `json:"updatedAt"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
@@ -165,6 +166,7 @@ type Keychain struct {
 	EncryptedPrivKey   []byte         `gorm:"type:blob" json:"encryptedPrivateKey,omitempty"`
 	Fingerprint        string         `gorm:"type:varchar(100)" json:"fingerprint,omitempty"`
 	CreatedAt          time.Time      `json:"createdAt"`
+	UpdatedAt          time.Time      `json:"updatedAt"`
 	DeletedAt          gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
