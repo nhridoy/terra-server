@@ -537,6 +537,15 @@ func SetMasterPassword(c *gin.Context) {
 		return
 	}
 
+	var req struct {
+		Ciphertext string `json:"ciphertext" binding:"required"`
+		Nonce      string `json:"nonce" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	var user db.User
 	if result := db.GetDB().Where("id = ?", userID).First(&user); result.Error != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
@@ -544,12 +553,38 @@ func SetMasterPassword(c *gin.Context) {
 	}
 
 	user.HasMasterPassword = true
+	user.MasterVerificationCipher = req.Ciphertext
+	user.MasterVerificationNonce = req.Nonce
 	if result := db.GetDB().Save(&user); result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update user"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "master password set"})
+}
+
+func GetMasterPassword(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var user db.User
+	if result := db.GetDB().Where("id = ?", userID).First(&user); result.Error != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+
+	if !user.HasMasterPassword {
+		c.JSON(http.StatusNotFound, gin.H{"error": "master password not set"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"ciphertext": user.MasterVerificationCipher,
+		"nonce":      user.MasterVerificationNonce,
+	})
 }
 
 func GetCurrentUser(c *gin.Context) {

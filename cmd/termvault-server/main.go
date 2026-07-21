@@ -124,6 +124,7 @@ func main() {
 			protected.POST("/auth/logout", api.Logout)
 			protected.POST("/auth/change-password", api.ChangePassword)
 			protected.POST("/auth/master-password", api.SetMasterPassword)
+			protected.GET("/auth/master-password", api.GetMasterPassword)
 			protected.GET("/auth/me", api.GetCurrentUser)
 			protected.PUT("/auth/profile", api.UpdateProfile)
 			protected.DELETE("/auth/account", api.DeleteAccount)

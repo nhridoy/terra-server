@@ -7,20 +7,22 @@ import (
 )
 
 type User struct {
-	ID                 string         `gorm:"primaryKey" json:"id"`
-	Email              string         `gorm:"uniqueIndex;size:255;not null" json:"email"`
-	Username           string         `gorm:"size:100;not null" json:"username"`
-	SrpSalt            string         `gorm:"size:64" json:"-"`
-	SrpVerifier        string         `gorm:"size:512" json:"-"`
-	KeyNonce           string         `gorm:"size:64" json:"-"`
-	KeySalt            string         `gorm:"size:64" json:"-"`
-	EncryptedPK        string         `gorm:"type:text" json:"-"`
-	EncryptedPriv      string         `gorm:"type:text" json:"-"`
-	PublicKey          string         `gorm:"type:text" json:"-"`
-	HasMasterPassword  bool           `gorm:"default:false" json:"-"`
-	CreatedAt          time.Time      `json:"createdAt"`
-	UpdatedAt          time.Time      `json:"updatedAt"`
-	DeletedAt          gorm.DeletedAt `gorm:"index" json:"-"`
+	ID                       string         `gorm:"primaryKey" json:"id"`
+	Email                    string         `gorm:"uniqueIndex;size:255;not null" json:"email"`
+	Username                 string         `gorm:"size:100;not null" json:"username"`
+	SrpSalt                  string         `gorm:"size:64" json:"-"`
+	SrpVerifier              string         `gorm:"size:512" json:"-"`
+	KeyNonce                 string         `gorm:"size:64" json:"-"`
+	KeySalt                  string         `gorm:"size:64" json:"-"`
+	EncryptedPK              string         `gorm:"type:text" json:"-"`
+	EncryptedPriv            string         `gorm:"type:text" json:"-"`
+	PublicKey                string         `gorm:"type:text" json:"-"`
+	HasMasterPassword        bool           `gorm:"default:false" json:"-"`
+	MasterVerificationCipher string         `gorm:"type:text" json:"-"`
+	MasterVerificationNonce  string         `gorm:"size:64" json:"-"`
+	CreatedAt                time.Time      `json:"createdAt"`
+	UpdatedAt                time.Time      `json:"updatedAt"`
+	DeletedAt                gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 type Vault struct {
