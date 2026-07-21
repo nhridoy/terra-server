@@ -2,11 +2,11 @@ package db
 
 import (
 	"fmt"
-	"log"
-	"os"
+	"log/slog"
 	"strings"
 
 	"github.com/glebarez/sqlite"
+	"github.com/termvault/termvault/internal/config"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -16,75 +16,97 @@ import (
 var DB *gorm.DB
 
 func Init() error {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = "termvault.db"
-	}
+	cfg := config.AppConfig
+	dsn := cfg.DBUrl
 
 	var dialector gorm.Dialector
 
 	switch {
 	case strings.HasPrefix(dsn, "sqlite"):
-		dbPath := strings.TrimPrefix(dsn, "sqlite://")
-		dbPath = strings.TrimPrefix(dbPath, "file:")
-		if idx := strings.Index(dbPath, "?"); idx != -1 {
-			dbPath = dbPath[:idx]
-		}
-		if dbPath == "" {
-			dbPath = "termvault.db"
-		}
-		dialector = sqlite.Open(dbPath)
-		log.Printf("Using SQLite database: %s", dbPath)
-
-	case strings.HasPrefix(dsn, "postgres"):
+		path := strings.TrimPrefix(dsn, "sqlite://")
+		path = strings.TrimPrefix(path, "sqlite:")
+		dialector = sqlite.Open(path + "?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_foreign_keys=ON")
+	case strings.HasPrefix(dsn, "postgres") || strings.HasPrefix(dsn, "postgresql"):
 		dialector = postgres.Open(dsn)
-		log.Println("Using PostgreSQL database")
-
 	case strings.HasPrefix(dsn, "mysql"):
 		dialector = mysql.Open(dsn)
-		log.Println("Using MySQL database")
-
 	default:
-		dialector = sqlite.Open("termvault.db")
-		log.Println("Using default SQLite database")
+		return fmt.Errorf("unsupported database driver for: %s", dsn)
 	}
 
 	var err error
 	DB, err = gorm.Open(dialector, &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	if err := Migrate(); err != nil {
-		return fmt.Errorf("failed to run migrations: %w", err)
-	}
-
-	log.Println("Database initialized successfully")
-	return nil
-}
-
-func Migrate() error {
-	return DB.AutoMigrate(
+	err = DB.AutoMigrate(
 		&User{},
-		&OAuthConnection{},
-		&Team{},
-		&TeamMember{},
+		&Vault{},
 		&Host{},
 		&Group{},
-		&Vault{},
 		&Keychain{},
 		&Snippet{},
-		&SessionLog{},
 		&Workspace{},
 		&TabGroup{},
 		&Settings{},
-		&SyncState{},
-		&SyncTracking{},
+		&RefreshToken{},
+		&Team{},
+		&TeamMember{},
+		&SharedVault{},
 	)
+	if err != nil {
+		return fmt.Errorf("failed to migrate database: %w", err)
+	}
+
+	if err := createIndexes(); err != nil {
+		return fmt.Errorf("failed to create indexes: %w", err)
+	}
+
+	slog.Info("Database initialized successfully")
+	return nil
+}
+
+func createIndexes() error {
+	type indexDef struct {
+		table string
+	 cols  string
+	}
+
+	indexes := []indexDef{
+		{"hosts", "user_id, vault_id"},
+		{"hosts", "user_id, group_id"},
+		{"groups", "user_id, vault_id"},
+		{"groups", "user_id, parent_id"},
+		{"keychain", "user_id, vault_id"},
+		{"snippets", "user_id, vault_id"},
+		{"workspaces", "user_id, vault_id"},
+		{"tab_groups", "user_id, vault_id"},
+		{"team_members", "team_id, user_id"},
+		{"team_members", "user_id"},
+		{"shared_vaults", "team_id"},
+		{"shared_vaults", "vault_id"},
+		{"refresh_tokens", "user_id"},
+		{"refresh_tokens", "expires_at"},
+	}
+
+	for _, idx := range indexes {
+		idxName := fmt.Sprintf("idx_%s_%s", idx.table, strings.ReplaceAll(idx.cols, ", ", "_"))
+		sql := fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s)", idxName, idx.table, idx.cols)
+		if err := DB.Exec(sql).Error; err != nil {
+			slog.Warn("Failed to create index", "index", idxName, "error", err)
+		}
+	}
+
+	return nil
 }
 
 func GetDB() *gorm.DB {
 	return DB
+}
+
+func InTransaction(fn func(tx *gorm.DB) error) error {
+	return DB.Transaction(fn)
 }

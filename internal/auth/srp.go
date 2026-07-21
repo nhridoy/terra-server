@@ -52,17 +52,8 @@ type SRPServerProof struct {
 	UserID string `json:"userId"`
 }
 
-// GenerateSalt creates a random 16-byte salt
-func GenerateSalt() ([]byte, error) {
-	salt := make([]byte, 16)
-	_, err := rand.Read(salt)
-	return salt, err
-}
-
 // CalculateVerifier computes the SRP verifier from password
 func CalculateVerifier(password string, salt []byte) *big.Int {
-	// x = H(salt | H(email | ":" | password))
-	// For simplicity, we use: x = H(password + salt)
 	x := calculateX(password, salt)
 	verifier := new(big.Int).Exp(srpGenerator, x, srpPrime)
 	return verifier
@@ -82,7 +73,6 @@ func VerifyPassword(email, password string, salt, verifierBytes []byte) bool {
 }
 
 func calculateX(password string, salt []byte) *big.Int {
-	// x = H(salt || H(password))
 	h := sha256.New()
 	h.Write([]byte(password))
 	passwordHash := h.Sum(nil)
@@ -96,25 +86,19 @@ func calculateX(password string, salt []byte) *big.Int {
 
 // CreateServerChallenge generates server public value B
 func CreateServerChallenge(verifier *big.Int) (*SRPServer, error) {
-	// Generate random b (128 bytes)
 	bBytes := make([]byte, 128)
 	if _, err := rand.Read(bBytes); err != nil {
 		return nil, err
 	}
 	b := new(big.Int).SetBytes(bBytes)
 
-	// B = (k * v + g^b) mod N
-	// k = H(N | g)
 	k := calculateK()
 
-	// k * v mod N
 	kv := new(big.Int).Mul(k, verifier)
 	kv.Mod(kv, srpPrime)
 
-	// g^b mod N
 	gb := new(big.Int).Exp(srpGenerator, b, srpPrime)
 
-	// B = (kv + gb) mod N
 	B := new(big.Int).Add(kv, gb)
 	B.Mod(B, srpPrime)
 
@@ -134,18 +118,15 @@ func calculateK() *big.Int {
 
 // CalculateSessionKey computes the shared session key
 func (s *SRPServer) CalculateSessionKey(A *big.Int) []byte {
-	// u = H(A | B)
 	h := sha256.New()
 	h.Write(A.Bytes())
 	h.Write(s.B.Bytes())
 	u := new(big.Int).SetBytes(h.Sum(nil))
 
-	// S = (A * v^u)^b mod N
 	vu := new(big.Int).Exp(s.Verifier, u, srpPrime)
 	avu := new(big.Int).Mul(A, vu)
 	S := new(big.Int).Exp(avu, s.b, srpPrime)
 
-	// K = H(S)
 	h.Reset()
 	h.Write(S.Bytes())
 	K := h.Sum(nil)
@@ -155,7 +136,6 @@ func (s *SRPServer) CalculateSessionKey(A *big.Int) []byte {
 
 // CalculateServerProof computes M2 for server proof
 func (s *SRPServer) CalculateServerProof(A *big.Int, M1 []byte, K []byte) []byte {
-	// M2 = H(A | M | K)
 	h := sha256.New()
 	h.Write(A.Bytes())
 	h.Write(M1)
@@ -165,7 +145,6 @@ func (s *SRPServer) CalculateServerProof(A *big.Int, M1 []byte, K []byte) []byte
 
 // ValidateClientProof validates M1 from client
 func ValidateClientProof(email string, password string, salt []byte, A *big.Int, M1 []byte) bool {
-	// Calculate expected M1
 	h := sha256.New()
 	h.Write(A.Bytes())
 
@@ -177,7 +156,6 @@ func ValidateClientProof(email string, password string, salt []byte, A *big.Int,
 
 	expectedM1 := h.Sum(nil)
 
-	// Constant-time comparison
 	if len(M1) != len(expectedM1) {
 		return false
 	}
@@ -189,7 +167,7 @@ func ValidateClientProof(email string, password string, salt []byte, A *big.Int,
 	return true
 }
 
-// Helper functions
+// HexToBytes converts a hex string to bytes
 func HexToBytes(hexStr string) ([]byte, error) {
 	if len(hexStr)%2 != 0 {
 		hexStr = "0" + hexStr
@@ -197,10 +175,12 @@ func HexToBytes(hexStr string) ([]byte, error) {
 	return hex.DecodeString(hexStr)
 }
 
+// BytesToHex converts bytes to a hex string
 func BytesToHex(bytes []byte) string {
 	return hex.EncodeToString(bytes)
 }
 
+// BigIntToHex converts a big.Int to a hex string
 func BigIntToHex(n *big.Int) string {
 	h := n.Text(16)
 	if len(h)%2 != 0 {
@@ -209,6 +189,7 @@ func BigIntToHex(n *big.Int) string {
 	return h
 }
 
+// HexToBigInt converts a hex string to a big.Int
 func HexToBigInt(hexStr string) *big.Int {
 	n := new(big.Int)
 	n.SetString(hexStr, 16)

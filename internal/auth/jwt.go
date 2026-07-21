@@ -15,16 +15,19 @@ type Claims struct {
 }
 
 type TokenPair struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	ExpiresAt    int64  `json:"expiresAt"`
+	AccessToken string `json:"accessToken"`
+	ExpiresAt   int64  `json:"expiresAt"`
 }
 
 func GenerateTokenPair(userID, email string) (*TokenPair, error) {
 	secret := []byte(config.AppConfig.JWTSecret)
 
-	// Access token (24 hours)
-	accessExpiry := time.Now().Add(24 * time.Hour)
+	jwtExpiry, err := time.ParseDuration(config.AppConfig.JWTExpiry)
+	if err != nil {
+		jwtExpiry = 15 * time.Minute
+	}
+
+	accessExpiry := time.Now().Add(jwtExpiry)
 	accessClaims := &Claims{
 		UserID: userID,
 		Email:  email,
@@ -41,28 +44,9 @@ func GenerateTokenPair(userID, email string) (*TokenPair, error) {
 		return nil, err
 	}
 
-	// Refresh token (7 days)
-	refreshExpiry := time.Now().Add(7 * 24 * time.Hour)
-	refreshClaims := &Claims{
-		UserID: userID,
-		Email:  email,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(refreshExpiry),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Issuer:    "termvault",
-		},
-	}
-
-	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims)
-	refreshString, err := refreshToken.SignedString(secret)
-	if err != nil {
-		return nil, err
-	}
-
 	return &TokenPair{
-		AccessToken:  accessString,
-		RefreshToken: refreshString,
-		ExpiresAt:    accessExpiry.Unix(),
+		AccessToken: accessString,
+		ExpiresAt:   accessExpiry.Unix(),
 	}, nil
 }
 

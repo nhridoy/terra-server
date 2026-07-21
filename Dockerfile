@@ -1,7 +1,7 @@
 # Build stage
-FROM golang:1.21-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
-# Install build dependencies
+# Install build dependencies (gcc needed for go-sqlite3 CGO)
 RUN apk add --no-cache git gcc musl-dev
 
 WORKDIR /app
@@ -13,14 +13,13 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application with optimizations
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags="-w -s -X main.version=1.0.0 -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    -a -installsuffix cgo \
+# Build with CGO enabled (required for go-sqlite3)
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-w -s" \
     -o termvault-server ./cmd/termvault-server
 
 # Final stage
-FROM alpine:3.18
+FROM alpine:3.19
 
 # Add non-root user for security
 RUN addgroup -g 1000 -S termvault && \

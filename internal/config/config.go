@@ -3,53 +3,43 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
-	Port    string
-	Host    string
-	DBUrl   string
-	JWTSecret string
-	JWTExpiry string
-
-	// OAuth
-	OAuthGitHubClientID     string
-	OAuthGitHubClientSecret string
-	OAuthGoogleClientID     string
-	OAuthGoogleClientSecret string
-	OAuthGitLabClientID     string
-	OAuthGitLabClientSecret string
-	OAuthMicrosoftClientID  string
-	OAuthMicrosoftClientSecret string
-	OAuthBitbucketClientID  string
-	OAuthBitbucketClientSecret string
-
-	// OAuth callback URLs
-	BaseURL string
+	Port              string
+	Host              string
+	DBUrl             string
+	JWTSecret         string
+	JWTExpiry         string
+	RefreshTokenExpiry string
+	BaseURL           string
+	AllowedOrigins    []string
+	TrustedProxies    []string
+	RateLimitAuth     int
+	RateLimitAPI      int
 }
 
 var AppConfig *Config
 
 func Load() *Config {
+	allowedOrigins := getEnv("ALLOWED_ORIGINS", "http://localhost:1420,http://localhost:5173,tauri://localhost,https://tauri.localhost")
+	trustedProxies := getEnv("TRUSTED_PROXIES", "")
+	rateLimitAuth := getEnvInt("RATE_LIMIT_AUTH", 10)
+	rateLimitAPI := getEnvInt("RATE_LIMIT_API", 30)
+
 	AppConfig = &Config{
-		Port:    getEnv("TERMVAULT_PORT", "8080"),
-		Host:    getEnv("TERMVAULT_HOST", "0.0.0.0"),
-		DBUrl:   getEnv("DATABASE_URL", "sqlite://termvault.db?cache=shared&_journal_mode=WAL"),
-		JWTSecret: getEnv("JWT_SECRET", "change-me-in-production"),
-		JWTExpiry: getEnv("JWT_EXPIRY", "24h"),
-
-		OAuthGitHubClientID:     getEnv("OAUTH_GITHUB_CLIENT_ID", ""),
-		OAuthGitHubClientSecret: getEnv("OAUTH_GITHUB_CLIENT_SECRET", ""),
-		OAuthGoogleClientID:     getEnv("OAUTH_GOOGLE_CLIENT_ID", ""),
-		OAuthGoogleClientSecret: getEnv("OAUTH_GOOGLE_CLIENT_SECRET", ""),
-		OAuthGitLabClientID:     getEnv("OAUTH_GITLAB_CLIENT_ID", ""),
-		OAuthGitLabClientSecret: getEnv("OAUTH_GITLAB_CLIENT_SECRET", ""),
-		OAuthMicrosoftClientID:  getEnv("OAUTH_MICROSOFT_CLIENT_ID", ""),
-		OAuthMicrosoftClientSecret: getEnv("OAUTH_MICROSOFT_CLIENT_SECRET", ""),
-		OAuthBitbucketClientID:  getEnv("OAUTH_BITBUCKET_CLIENT_ID", ""),
-		OAuthBitbucketClientSecret: getEnv("OAUTH_BITBUCKET_CLIENT_SECRET", ""),
-
-		BaseURL: getEnv("BASE_URL", "http://localhost:8080"),
+		Port:              getEnv("TERMVAULT_PORT", "8080"),
+		Host:              getEnv("TERMVAULT_HOST", "0.0.0.0"),
+		DBUrl:             getEnv("DATABASE_URL", "sqlite://termvault.db?cache=shared&_journal_mode=WAL"),
+		JWTSecret:         getEnv("JWT_SECRET", "change-me-in-production"),
+		JWTExpiry:         getEnv("JWT_EXPIRY", "24h"),
+		RefreshTokenExpiry: getEnv("REFRESH_TOKEN_EXPIRY", "720h"),
+		BaseURL:           getEnv("BASE_URL", "http://localhost:8080"),
+		AllowedOrigins:    strings.Split(allowedOrigins, ","),
+		TrustedProxies:    splitNonEmpty(trustedProxies, ","),
+		RateLimitAuth:     rateLimitAuth,
+		RateLimitAPI:      rateLimitAPI,
 	}
 
 	return AppConfig
@@ -64,18 +54,27 @@ func getEnv(key, defaultValue string) string {
 
 func getEnvInt(key string, defaultValue int) int {
 	if value, exists := os.LookupEnv(key); exists {
-		if intVal, err := strconv.Atoi(value); err == nil {
-			return intVal
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			return parsed
 		}
 	}
 	return defaultValue
 }
 
-func getEnvBool(key string, defaultValue bool) bool {
-	if value, exists := os.LookupEnv(key); exists {
-		if boolVal, err := strconv.ParseBool(value); err == nil {
-			return boolVal
+func splitNonEmpty(s, sep string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, sep)
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			result = append(result, trimmed)
 		}
 	}
-	return defaultValue
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }

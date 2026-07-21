@@ -1,392 +1,351 @@
 package api
 
 import (
-	"encoding/json"
-	"log"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mitchellh/mapstructure"
+	"github.com/termvault/termvault/internal/auth"
 	"github.com/termvault/termvault/internal/db"
 )
 
-type SyncRecord struct {
-	TableName string          `json:"tableName"`
-	RecordID  string          `json:"recordId"`
-	Data      json.RawMessage `json:"data"`
-	UpdatedAt time.Time       `json:"updatedAt"`
-	DeviceID  string          `json:"deviceId"`
-	IsDeleted bool            `json:"isDeleted,omitempty"`
-}
+const (
+	maxPasswordLength   = 4096
+	maxPrivateKeyLength = 65536
+	maxPassphraseLength = 4096
+	maxNameLength       = 255
+	maxDescriptionLength = 1024
+)
 
 type SyncPushRequest struct {
-	Records  []SyncRecord `json:"records"`
-	DeviceID string       `json:"deviceId"`
+	Table   string           `json:"table" binding:"required"`
+	Records []map[string]any `json:"records" binding:"required"`
 }
 
-type SyncPullResponse struct {
-	Records   []SyncRecord `json:"records"`
-	SyncToken string       `json:"syncToken"`
-	HasMore   bool         `json:"hasMore"`
+type SyncPushResponse struct {
+	Results []SyncResult `json:"results"`
+}
+
+type SyncResult struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	Operation string `json:"operation"`
+}
+
+type SyncFullResponse struct {
+	Hosts      []db.Host      `json:"hosts"`
+	Groups     []db.Group     `json:"groups"`
+	Vaults     []db.Vault     `json:"vaults"`
+	Keychain   []db.Keychain  `json:"keychain"`
+	Snippets   []db.Snippet   `json:"snippets"`
+	Workspaces []db.Workspace `json:"workspaces"`
+	TabGroups  []db.TabGroup  `json:"tabGroups"`
+	Settings   []db.Settings  `json:"settings"`
+}
+
+func SyncFull(c *gin.Context) {
+	userID := auth.GetUserID(c)
+
+	var hosts []db.Host
+	db.GetDB().Where("user_id = ?", userID).Find(&hosts)
+
+	var groups []db.Group
+	db.GetDB().Where("user_id = ?", userID).Find(&groups)
+
+	var vaults []db.Vault
+	db.GetDB().Where("user_id = ?", userID).Find(&vaults)
+
+	var keychain []db.Keychain
+	db.GetDB().Where("user_id = ?", userID).Find(&keychain)
+
+	var snippets []db.Snippet
+	db.GetDB().Where("user_id = ?", userID).Find(&snippets)
+
+	var workspaces []db.Workspace
+	db.GetDB().Where("user_id = ?", userID).Find(&workspaces)
+
+	var tabGroups []db.TabGroup
+	db.GetDB().Where("user_id = ?", userID).Find(&tabGroups)
+
+	var settings []db.Settings
+	db.GetDB().Where("user_id = ?", userID).Find(&settings)
+
+	c.JSON(http.StatusOK, SyncFullResponse{
+		Hosts:      hosts,
+		Groups:     groups,
+		Vaults:     vaults,
+		Keychain:   keychain,
+		Snippets:   snippets,
+		Workspaces: workspaces,
+		TabGroups:  tabGroups,
+		Settings:   settings,
+	})
+}
+
+// verifyOwnership checks that a record with the given ID belongs to the authenticated user.
+// Returns true if the record exists and belongs to the user, false otherwise.
+func verifyOwnership(table, recordID, userID string) bool {
+	var count int64
+	db.GetDB().Table(table).Where("id = ? AND user_id = ?", recordID, userID).Count(&count)
+	return count > 0
+}
+
+// ErrConflict is returned when the client's record is older than the server's.
+var ErrConflict = errors.New("record conflict: server has newer version")
+
+// ErrOwnershipMismatch is returned when a user tries to modify a record they don't own.
+var ErrOwnershipMismatch = errors.New("record does not belong to this user")
+
+// parseTimestamp parses an updated_at value from the client (RFC3339 string or time.Time).
+func parseTimestamp(v any) (time.Time, error) {
+	switch t := v.(type) {
+	case string:
+		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
+			return parsed, nil
+		}
+		if parsed, err := time.Parse("2006-01-02T15:04:05", t); err == nil {
+			return parsed, nil
+		}
+		return time.Time{}, errors.New("invalid timestamp format")
+	case time.Time:
+		return t, nil
+	default:
+		return time.Time{}, errors.New("unexpected timestamp type")
+	}
+}
+
+// upsertWithTimestampCheck inserts a new record or updates an existing one after comparing updated_at timestamps.
+// Returns ErrConflict if the incoming record is older than the server's version.
+func upsertWithTimestampCheck(table, recordID, userID string, record map[string]any, dest any) error {
+	var count int64
+	db.GetDB().Table(table).Where("id = ?", recordID).Count(&count)
+	if count == 0 {
+		return db.GetDB().Create(dest).Error
+	}
+
+	if !verifyOwnership(table, recordID, userID) {
+		return ErrOwnershipMismatch
+	}
+
+	incomingTime, err := parseTimestamp(record["updated_at"])
+	if err != nil {
+		return fmt.Errorf("invalid timestamp: %w", err)
+	}
+
+	var existingTime time.Time
+	if result := db.GetDB().Table(table).Where("id = ?", recordID).Select("updated_at").Scan(&existingTime); result.Error != nil {
+		return db.GetDB().Save(dest).Error
+	}
+
+	if !incomingTime.After(existingTime) {
+		return ErrConflict
+	}
+
+	return db.GetDB().Save(dest).Error
 }
 
 func SyncPush(c *gin.Context) {
-	userID := c.GetString("userId")
+	userID := auth.GetUserID(c)
+
 	var req SyncPushRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	conflicts := []SyncRecord{}
-	for _, record := range req.Records {
-		var existing db.SyncTracking
-		result := db.DB.Where("table_name = ? AND record_id = ? AND user_id = ?",
-			record.TableName, record.RecordID, userID).First(&existing)
-
-		if result.Error == nil {
-			if !existing.UpdatedAt.Before(record.UpdatedAt) {
-				fullRecord := fetchFullRecord(record.TableName, record.RecordID, userID)
-				conflicts = append(conflicts, SyncRecord{
-					TableName: record.TableName,
-					RecordID:  record.RecordID,
-					Data:      fullRecord,
-					UpdatedAt: existing.UpdatedAt,
-					DeviceID:  existing.DeviceID,
-					IsDeleted: existing.IsDeleted,
-				})
-				continue
-			}
-		}
-
-		upsertRecord(userID, record)
+	allowed := map[string]bool{
+		"hosts": true, "groups": true, "vaults": true, "keychain": true,
+		"snippets": true, "workspaces": true, "tab_groups": true, "settings": true,
 	}
-
-	var syncState db.SyncState
-	db.DB.Where("user_id = ? AND device_id = ?", userID, req.DeviceID).First(&syncState)
-	syncState.UserID = userID
-	syncState.DeviceID = req.DeviceID
-	syncState.LastSyncAt = time.Now()
-	db.DB.Save(&syncState)
-
-	c.JSON(http.StatusOK, gin.H{
-		"status":    "ok",
-		"accepted":  len(req.Records) - len(conflicts),
-		"conflicts": conflicts,
-	})
-}
-
-func SyncPull(c *gin.Context) {
-	userID := c.GetString("userId")
-	since := c.Query("since")
-	deviceID := c.Query("deviceId")
-
-	sinceTime, err := time.Parse(time.RFC3339, since)
-	if err != nil {
-		sinceTime = time.Now().Add(-24 * time.Hour)
-	}
-
-	records := []SyncRecord{}
-	var tracking []db.SyncTracking
-	db.DB.Where("user_id = ? AND updated_at > ? AND device_id != ?", userID, sinceTime, deviceID).Find(&tracking)
-
-	for _, t := range tracking {
-		fullData := fetchFullRecord(t.TableName, t.RecordID, userID)
-		records = append(records, SyncRecord{
-			TableName: t.TableName,
-			RecordID:  t.RecordID,
-			Data:      fullData,
-			UpdatedAt: t.UpdatedAt,
-			DeviceID:  t.DeviceID,
-			IsDeleted: t.IsDeleted,
-		})
-	}
-
-	c.JSON(http.StatusOK, SyncPullResponse{
-		Records:   records,
-		SyncToken: time.Now().Format(time.RFC3339),
-		HasMore:   false,
-	})
-}
-
-func SyncFull(c *gin.Context) {
-	userID := c.GetString("userId")
-	records := []SyncRecord{}
-
-	type scanRow struct {
-		ID        string
-		UpdatedAt string
-		Data      string
-	}
-
-	queries := []struct {
-		TableName string
-		Query     string
-	}{
-		{"vaults", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'name', name, 'description', description, 'is_default', is_default, 'is_system', is_system, 'encrypted_data', encrypted_data, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM vaults WHERE user_id = ? AND deleted_at IS NULL"},
-		{"hosts", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'group_id', group_id, 'name', name, 'hostname', hostname, 'address', address, 'port', port, 'username', username, 'auth_method', auth_method, 'tags', tags, 'color', color, 'icon', icon, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM hosts WHERE user_id = ? AND deleted_at IS NULL"},
-		{"groups", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'parent_id', parent_id, 'name', name, 'sort_order', sort_order, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM groups WHERE user_id = ? AND deleted_at IS NULL"},
-		{"keychain", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'description', description, 'key_type', key_type, 'public_key', public_key, 'encrypted_private_key', encrypted_private_key, 'fingerprint', fingerprint, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM keychain WHERE user_id = ? AND deleted_at IS NULL"},
-		{"snippets", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'command', command, 'description', description, 'tags', tags, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM snippets WHERE user_id = ? AND deleted_at IS NULL"},
-		{"workspaces", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'host_ids', host_ids, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM workspaces WHERE user_id = ? AND deleted_at IS NULL"},
-		{"tab_groups", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'vault_id', vault_id, 'name', name, 'layout', layout, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM tab_groups WHERE user_id = ? AND deleted_at IS NULL"},
-		{"settings", "SELECT id, COALESCE(updated_at, created_at) AS updated_at, json_object('id', id, 'user_id', user_id, 'theme', theme, 'font_family', font_family, 'font_size', font_size, 'cursor_style', cursor_style, 'keybindings', keybindings, 'created_at', created_at, 'updated_at', COALESCE(updated_at, created_at)) AS data FROM settings WHERE user_id = ? AND deleted_at IS NULL"},
-	}
-
-	for _, q := range queries {
-		var rows []scanRow
-		db.DB.Raw(q.Query, userID).Scan(&rows)
-		for _, row := range rows {
-			parsedTime := parseDateTime(row.UpdatedAt)
-			records = append(records, SyncRecord{
-				TableName: q.TableName,
-				RecordID:  row.ID,
-				Data:      json.RawMessage(row.Data),
-				UpdatedAt: parsedTime,
-				IsDeleted: false,
-			})
-		}
-	}
-
-	var deletedTracking []db.SyncTracking
-	db.DB.Where("user_id = ? AND is_deleted = ?", userID, true).Find(&deletedTracking)
-	for _, t := range deletedTracking {
-		records = append(records, SyncRecord{
-			TableName: t.TableName,
-			RecordID:  t.RecordID,
-			Data:      json.RawMessage("{}"),
-			UpdatedAt: t.UpdatedAt,
-			DeviceID:  t.DeviceID,
-			IsDeleted: true,
-		})
-	}
-
-	c.JSON(http.StatusOK, SyncPullResponse{
-		Records:   records,
-		SyncToken: time.Now().Format(time.RFC3339),
-		HasMore:   false,
-	})
-}
-
-func upsertRecord(userID string, record SyncRecord) {
-	if record.IsDeleted {
-		deleteRecord(record.TableName, record.RecordID, userID)
-
-		tracking := db.SyncTracking{
-			TableName: record.TableName,
-			RecordID:  record.RecordID,
-			UserID:    userID,
-			UpdatedAt: record.UpdatedAt,
-			DeviceID:  record.DeviceID,
-			IsDeleted: true,
-		}
-		db.DB.Save(&tracking)
+	if !allowed[req.Table] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown table"})
 		return
 	}
 
-	switch record.TableName {
-	case "vaults":
-		var vault db.Vault
-		if err := json.Unmarshal(record.Data, &vault); err != nil {
-			log.Printf("Failed to unmarshal vault: %v", err)
-			return
-		}
-		vault.UserID = userID
-		db.DB.Save(&vault)
+	// Enforce max batch size to prevent abuse
+	if len(req.Records) > 500 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "batch too large, max 500 records"})
+		return
+	}
 
+	var results []SyncResult
+
+	// Process each record
+	for _, record := range req.Records {
+		recordID := toString(record["id"])
+		if recordID == "" {
+			continue // skip records without an ID
+		}
+
+		// Check if this record is marked for deletion
+		isDeleted := toBool(record["is_deleted"])
+		
+		var operation string
+		var err error
+		
+		if isDeleted {
+			// Delete the record
+			operation = "delete"
+			err = deleteRecord(req.Table, recordID, userID)
+		} else {
+			// Upsert the record
+			operation = "upsert"
+			err = upsertRecord(req.Table, recordID, userID, record)
+		}
+
+		// Build result
+		result := SyncResult{
+			ID:        recordID,
+			Status:    "ok",
+			Operation: operation,
+		}
+		
+		if err != nil {
+			if errors.Is(err, ErrConflict) {
+				result.Status = "conflict"
+			} else {
+				result.Status = "error"
+			}
+		}
+		
+		results = append(results, result)
+	}
+
+	c.JSON(http.StatusOK, SyncPushResponse{Results: results})
+}
+
+// deleteRecord deletes a record by ID with ownership verification.
+// If the record doesn't exist, returns nil (idempotent).
+func deleteRecord(table, recordID, userID string) error {
+	var count int64
+	db.GetDB().Table(table).Where("id = ?", recordID).Count(&count)
+	if count == 0 {
+		return nil // Already deleted — idempotent success
+	}
+	if !verifyOwnership(table, recordID, userID) {
+		return ErrOwnershipMismatch
+	}
+
+	return db.GetDB().Table(table).Where("id = ?", recordID).Delete(nil).Error
+}
+
+// validateRecordFields checks credential field lengths for hosts and keychain tables.
+// Returns an error if any field exceeds its maximum allowed length.
+func validateRecordFields(table string, record map[string]any) error {
+	switch table {
+	case "hosts":
+		if password := toString(record["password"]); len(password) > maxPasswordLength {
+			return fmt.Errorf("password exceeds maximum length of %d", maxPasswordLength)
+		}
+		if privateKey := toString(record["private_key"]); len(privateKey) > maxPrivateKeyLength {
+			return fmt.Errorf("private_key exceeds maximum length of %d", maxPrivateKeyLength)
+		}
+		if passphrase := toString(record["passphrase"]); len(passphrase) > maxPassphraseLength {
+			return fmt.Errorf("passphrase exceeds maximum length of %d", maxPassphraseLength)
+		}
+		if name := toString(record["name"]); len(name) > maxNameLength {
+			return fmt.Errorf("name exceeds maximum length of %d", maxNameLength)
+		}
+	case "keychain":
+		if encKey := toString(record["encrypted_private_key"]); len(encKey) > maxPrivateKeyLength {
+			return fmt.Errorf("encrypted_private_key exceeds maximum length of %d", maxPrivateKeyLength)
+		}
+		if name := toString(record["name"]); len(name) > maxNameLength {
+			return fmt.Errorf("name exceeds maximum length of %d", maxNameLength)
+		}
+		if desc := toString(record["description"]); len(desc) > maxDescriptionLength {
+			return fmt.Errorf("description exceeds maximum length of %d", maxDescriptionLength)
+		}
+	}
+	return nil
+}
+
+// upsertRecord inserts or updates a record with ownership verification and timestamp conflict check.
+func upsertRecord(table, recordID, userID string, record map[string]any) error {
+	record["user_id"] = userID
+
+	// Validate field lengths before upserting
+	if err := validateRecordFields(table, record); err != nil {
+		return err
+	}
+
+	switch table {
 	case "hosts":
 		var host db.Host
-		if err := json.Unmarshal(record.Data, &host); err != nil {
-			log.Printf("Failed to unmarshal host: %v", err)
-			return
-		}
-		host.UserID = userID
-		db.DB.Save(&host)
-
+		mapToStruct(record, &host)
+		return upsertWithTimestampCheck("hosts", recordID, userID, record, &host)
 	case "groups":
 		var group db.Group
-		if err := json.Unmarshal(record.Data, &group); err != nil {
-			log.Printf("Failed to unmarshal group: %v", err)
-			return
-		}
-		group.UserID = userID
-		db.DB.Save(&group)
-
-	case "keychain":
-		var kc db.Keychain
-		if err := json.Unmarshal(record.Data, &kc); err != nil {
-			log.Printf("Failed to unmarshal keychain entry: %v", err)
-			return
-		}
-		kc.UserID = userID
-		db.DB.Save(&kc)
-
-	case "snippets":
-		var snippet db.Snippet
-		if err := json.Unmarshal(record.Data, &snippet); err != nil {
-			log.Printf("Failed to unmarshal snippet: %v", err)
-			return
-		}
-		snippet.UserID = userID
-		db.DB.Save(&snippet)
-
-	case "workspaces":
-		var ws db.Workspace
-		if err := json.Unmarshal(record.Data, &ws); err != nil {
-			log.Printf("Failed to unmarshal workspace: %v", err)
-			return
-		}
-		ws.UserID = userID
-		db.DB.Save(&ws)
-
-	case "tab_groups":
-		var tg db.TabGroup
-		if err := json.Unmarshal(record.Data, &tg); err != nil {
-			log.Printf("Failed to unmarshal tab group: %v", err)
-			return
-		}
-		tg.UserID = userID
-		db.DB.Save(&tg)
-
-	case "settings":
-		var s db.Settings
-		if err := json.Unmarshal(record.Data, &s); err != nil {
-			log.Printf("Failed to unmarshal settings: %v", err)
-			return
-		}
-		s.UserID = userID
-		db.DB.Save(&s)
-
-	case "session_logs":
-		var sl db.SessionLog
-		if err := json.Unmarshal(record.Data, &sl); err != nil {
-			log.Printf("Failed to unmarshal session log: %v", err)
-			return
-		}
-		sl.UserID = userID
-		db.DB.Save(&sl)
-	}
-
-	tracking := db.SyncTracking{
-		TableName: record.TableName,
-		RecordID:  record.RecordID,
-		UserID:    userID,
-		UpdatedAt: record.UpdatedAt,
-		DeviceID:  record.DeviceID,
-		IsDeleted: record.IsDeleted,
-	}
-	db.DB.Save(&tracking)
-}
-
-func deleteRecord(tableName, recordID, userID string) {
-	switch tableName {
-	case "vaults":
-		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Vault{})
-	case "hosts":
-		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Host{})
-	case "groups":
-		db.DB.Model(&db.Group{}).Where("parent_id = ?", recordID).Update("parent_id", nil)
-		db.DB.Model(&db.Host{}).Where("group_id = ?", recordID).Update("group_id", nil)
-		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Group{})
-	case "keychain":
-		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Keychain{})
-	case "snippets":
-		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Snippet{})
-	case "workspaces":
-		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Workspace{})
-	case "tab_groups":
-		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.TabGroup{})
-	case "settings":
-		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.Settings{})
-	case "session_logs":
-		db.DB.Where("id = ? AND user_id = ?", recordID, userID).Delete(&db.SessionLog{})
-	}
-}
-
-func fetchFullRecord(tableName, recordID, userID string) json.RawMessage {
-	switch tableName {
+		mapToStruct(record, &group)
+		return upsertWithTimestampCheck("groups", recordID, userID, record, &group)
 	case "vaults":
 		var vault db.Vault
-		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&vault).Error; err != nil {
-			return json.RawMessage("{}")
-		}
-		data, _ := json.Marshal(vault)
-		return data
-	case "hosts":
-		var host db.Host
-		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&host).Error; err != nil {
-			return json.RawMessage("{}")
-		}
-		data, _ := json.Marshal(host)
-		return data
-	case "groups":
-		var group db.Group
-		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&group).Error; err != nil {
-			return json.RawMessage("{}")
-		}
-		data, _ := json.Marshal(group)
-		return data
+		mapToStruct(record, &vault)
+		return upsertWithTimestampCheck("vaults", recordID, userID, record, &vault)
 	case "keychain":
-		var kc db.Keychain
-		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&kc).Error; err != nil {
-			return json.RawMessage("{}")
-		}
-		data, _ := json.Marshal(kc)
-		return data
+		var key db.Keychain
+		mapToStruct(record, &key)
+		return upsertWithTimestampCheck("keychain", recordID, userID, record, &key)
 	case "snippets":
 		var snippet db.Snippet
-		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&snippet).Error; err != nil {
-			return json.RawMessage("{}")
-		}
-		data, _ := json.Marshal(snippet)
-		return data
+		mapToStruct(record, &snippet)
+		return upsertWithTimestampCheck("snippets", recordID, userID, record, &snippet)
 	case "workspaces":
-		var ws db.Workspace
-		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&ws).Error; err != nil {
-			return json.RawMessage("{}")
-		}
-		data, _ := json.Marshal(ws)
-		return data
+		var workspace db.Workspace
+		mapToStruct(record, &workspace)
+		return upsertWithTimestampCheck("workspaces", recordID, userID, record, &workspace)
 	case "tab_groups":
-		var tg db.TabGroup
-		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&tg).Error; err != nil {
-			return json.RawMessage("{}")
-		}
-		data, _ := json.Marshal(tg)
-		return data
+		var tabGroup db.TabGroup
+		mapToStruct(record, &tabGroup)
+		return upsertWithTimestampCheck("tab_groups", recordID, userID, record, &tabGroup)
 	case "settings":
-		var s db.Settings
-		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&s).Error; err != nil {
-			return json.RawMessage("{}")
-		}
-		data, _ := json.Marshal(s)
-		return data
-	case "session_logs":
-		var sl db.SessionLog
-		if err := db.DB.Where("id = ? AND user_id = ?", recordID, userID).First(&sl).Error; err != nil {
-			return json.RawMessage("{}")
-		}
-		data, _ := json.Marshal(sl)
-		return data
+		var settings db.Settings
+		mapToStruct(record, &settings)
+		return upsertWithTimestampCheck("settings", recordID, userID, record, &settings)
+	default:
+		return ErrOwnershipMismatch
 	}
-	return json.RawMessage("{}")
 }
 
-func parseDateTime(s string) time.Time {
-	formats := []string{
-		"2006-01-02 15:04:05.9999999-07:00",
-		"2006-01-02 15:04:05.9999999+00:00",
-		"2006-01-02 15:04:05-07:00",
-		"2006-01-02 15:04:05+00:00",
-		"2006-01-02T15:04:05.9999999Z",
-		"2006-01-02T15:04:05Z",
-		time.RFC3339,
-		time.RFC3339Nano,
+// mapToStruct copies fields from a map to a struct pointer using mapstructure.
+// Uses the "json" tag for field name mapping. Fields with json:"-" are handled
+// explicitly since mapstructure skips them.
+func mapToStruct(m map[string]any, dest any) {
+	config := &mapstructure.DecoderConfig{
+		Result:  dest,
+		TagName: "json",
 	}
-	for _, f := range formats {
-		if t, err := time.Parse(f, s); err == nil {
-			return t
-		}
+	decoder, err := mapstructure.NewDecoder(config)
+	if err != nil {
+		return
 	}
-	return time.Now()
+	decoder.Decode(m)
+
+	// Fields with json:"-" tags are skipped by mapstructure.
+	// Assign them explicitly from the map.
+	switch d := dest.(type) {
+	case *db.Host:
+		d.Password = toString(m["password"])
+		d.PrivateKey = toString(m["private_key"])
+		d.Passphrase = toString(m["passphrase"])
+	case *db.Keychain:
+		d.Data = toString(m["data"])
+	}
+}
+
+func toString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func toBool(v any) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return false
 }
