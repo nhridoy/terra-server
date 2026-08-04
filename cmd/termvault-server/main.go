@@ -7,18 +7,41 @@ import (
 	"syscall"
 
 	"github.com/gin-gonic/gin"
+	gormsqlite "github.com/glebarez/sqlite"
+	"github.com/termvault/termvault/internal/config"
+	"github.com/termvault/termvault/internal/models"
+	"gorm.io/gorm"
 )
 
 func main() {
+	cfg := config.Load()
+
+	var db *gorm.DB
+	var err error
+
+	if cfg.DatabaseURL == "" || cfg.DatabaseURL == "sqlite://termvault.db" {
+		db, err = gorm.Open(gormsqlite.Open("termvault.db"), &gorm.Config{})
+	} else {
+		db, err = gorm.Open(gormsqlite.Open(cfg.DatabaseURL), &gorm.Config{})
+	}
+
+	if err != nil {
+		slog.Error("failed to connect database", "error", err)
+		os.Exit(1)
+	}
+
+	if err := models.AutoMigrate(db); err != nil {
+		slog.Error("failed to run migrations", "error", err)
+		os.Exit(1)
+	}
+
 	r := gin.Default()
+
 	r.GET("/", func(c *gin.Context) {
-		c.JSON(200, gin.H{"message": "hello world"})
+		c.JSON(200, gin.H{"message": "TermVault API"})
 	})
 
-	addr := ":8080"
-	if port := os.Getenv("TERMVAULT_PORT"); port != "" {
-		addr = ":" + port
-	}
+	addr := cfg.Host + ":" + cfg.Port
 
 	go func() {
 		slog.Info("server starting", "addr", addr)

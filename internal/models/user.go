@@ -1,0 +1,26 @@
+package models
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type User struct {
+	ID           uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	Email        string     `gorm:"uniqueIndex;not null" json:"email"`
+	Name         string     `gorm:"not null" json:"name"`
+	AuthProvider string     `gorm:"not null;default:'password'" json:"auth_provider"`
+	ProviderSub  *string    `gorm:"uniqueIndex" json:"provider_sub,omitempty"`
+	AuthVerifier *string    `json:"-"`
+	AuthSalt     *string    `json:"-"`
+	SaltCL       *string    `json:"salt_cl,omitempty"`
+	KDFM         int        `gorm:"not null;default:67108864" json:"kdf_m"`
+	KDFT         int        `gorm:"not null;default:3" json:"kdf_t"`
+	KDFP         int        `gorm:"not null;default:1" json:"kdf_p"`
+	PublicKey    *string    `json:"public_key,omitempty"`
+	Initialized  bool       `gorm:"not null;default:false" json:"initialized"`
+	LastLoginAt  *time.Time `json:"last_login_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
