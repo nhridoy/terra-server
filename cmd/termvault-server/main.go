@@ -48,10 +48,12 @@ func main() {
 	apiAuth.POST("/login", auth.HandleLogin(db, cfg))
 	apiAuth.POST("/refresh", auth.HandleRefresh(db, cfg))
 	apiAuth.POST("/logout", auth.HandleLogout(db))
+	apiAuth.POST("/recovery", auth.HandleRecovery(db, cfg))
 
 	protected := r.Group("/api/v1")
 	protected.Use(auth.JWTMiddleware(cfg))
 	protected.GET("/me", auth.HandleMe(db))
+	protected.POST("/auth/password-change", auth.HandlePasswordChange(db, cfg))
 
 	addr := cfg.Host + ":" + cfg.Port
 

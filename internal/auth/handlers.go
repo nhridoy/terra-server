@@ -303,6 +303,203 @@ func HandleLogout(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
+type passwordChangeRequest struct {
+	OldProof        string `json:"old_proof" binding:"required"`
+	OldNonce        string `json:"old_nonce" binding:"required"`
+	NewVerifier     string `json:"new_verifier" binding:"required"`
+	NewEncryptedDEK string `json:"new_encrypted_dek"`
+	NewNonce        string `json:"new_nonce"`
+	NewKDFM         int    `json:"new_kdf_m"`
+	NewKDFT         int    `json:"new_kdf_t"`
+	NewKDFP         int    `json:"new_kdf_p"`
+	NewServerSalt   string `json:"new_server_salt"`
+	NewSaltCL       string `json:"new_salt_cl"`
+}
+
+func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, exists := c.Get("user_id")
+		if !exists {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "missing user context")
+			return
+		}
+
+		var req passwordChangeRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid request body")
+			return
+		}
+
+		var user models.User
+		if db.Where("id = ?", userID).First(&user).Error != nil {
+			Error(c, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+
+		if user.AuthVerifier == nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "no verifier set")
+			return
+		}
+
+		oldProofBytes, err := base64.RawStdEncoding.DecodeString(req.OldProof)
+		if err != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid old proof")
+			return
+		}
+		oldNonceBytes, err := base64.RawStdEncoding.DecodeString(req.OldNonce)
+		if err != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid old nonce")
+			return
+		}
+		verifierBytes, err := base64.RawStdEncoding.DecodeString(*user.AuthVerifier)
+		if err != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid stored verifier")
+			return
+		}
+
+		expectedProof := GenerateProof(verifierBytes, oldNonceBytes)
+		if !ConstantTimeCompare(oldProofBytes, expectedProof) {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "old proof verification failed")
+			return
+		}
+
+		updates := map[string]interface{}{
+			"auth_verifier": req.NewVerifier,
+		}
+		if req.NewServerSalt != "" {
+			updates["auth_salt"] = req.NewServerSalt
+		}
+		if req.NewSaltCL != "" {
+			updates["salt_cl"] = req.NewSaltCL
+		}
+		if req.NewKDFM != 0 {
+			user.KDFM = req.NewKDFM
+		}
+		if req.NewKDFT != 0 {
+			user.KDFT = req.NewKDFT
+		}
+		if req.NewKDFP != 0 {
+			user.KDFP = req.NewKDFP
+		}
+		user.AuthVerifier = &req.NewVerifier
+		if req.NewServerSalt != "" {
+			user.AuthSalt = &req.NewServerSalt
+		}
+		if req.NewSaltCL != "" {
+			user.SaltCL = &req.NewSaltCL
+		}
+		if err := db.Save(&user).Error; err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to update user")
+			return
+		}
+
+		if req.NewEncryptedDEK != "" {
+			var uk models.UserKey
+			if db.Where("user_id = ? AND key_type = ?", user.ID, "dek").First(&uk).Error == nil {
+				db.Model(&uk).Update("payload", req.NewEncryptedDEK)
+			} else {
+				uk = models.UserKey{
+					UserID:  user.ID,
+					KeyType: "dek",
+					Payload: req.NewEncryptedDEK,
+				}
+				db.Create(&uk)
+			}
+		}
+
+		db.Model(&models.RefreshToken{}).
+			Where("user_id = ? AND revoked_at IS NULL", user.ID).
+			Update("revoked_at", time.Now())
+
+		c.Status(http.StatusNoContent)
+	}
+}
+
+type recoveryRequest struct {
+	RecoveryCode    string `json:"recovery_code" binding:"required"`
+	Signature       string `json:"signature" binding:"required"`
+	NewVerifier     string `json:"new_verifier" binding:"required"`
+	NewEncryptedDEK string `json:"new_encrypted_dek"`
+	NewNonce        string `json:"new_nonce"`
+	NewKDFM         int    `json:"new_kdf_m"`
+	NewKDFT         int    `json:"new_kdf_t"`
+	NewKDFP         int    `json:"new_kdf_p"`
+	NewServerSalt   string `json:"new_server_salt"`
+	NewSaltCL       string `json:"new_salt_cl"`
+}
+
+func HandleRecovery(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req recoveryRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid request body")
+			return
+		}
+
+		recoveryCodeBytes, err := base64.RawStdEncoding.DecodeString(req.RecoveryCode)
+		if err != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid recovery code")
+			return
+		}
+		codeHash := sha256.Sum256(recoveryCodeBytes)
+		codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
+
+		var user models.User
+		if db.Where("recovery_hash = ?", codeHashB64).First(&user).Error != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid recovery code")
+			return
+		}
+
+		sigBytes, err := base64.RawStdEncoding.DecodeString(req.Signature)
+		if err != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid signature encoding")
+			return
+		}
+		if len(sigBytes) < 1 {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid signature")
+			return
+		}
+
+		user.AuthVerifier = &req.NewVerifier
+		user.RecoveryHash = nil
+		if req.NewServerSalt != "" {
+			user.AuthSalt = &req.NewServerSalt
+		}
+		if req.NewSaltCL != "" {
+			user.SaltCL = &req.NewSaltCL
+		}
+		if req.NewKDFM != 0 {
+			user.KDFM = req.NewKDFM
+		}
+		if req.NewKDFT != 0 {
+			user.KDFT = req.NewKDFT
+		}
+		if req.NewKDFP != 0 {
+			user.KDFP = req.NewKDFP
+		}
+		if err := db.Save(&user).Error; err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to update user")
+			return
+		}
+
+		if req.NewEncryptedDEK != "" {
+			db.Where("user_id = ? AND key_type = ?", user.ID, "dek").Delete(&models.UserKey{})
+			uk := models.UserKey{
+				UserID:  user.ID,
+				KeyType: "dek",
+				Payload: req.NewEncryptedDEK,
+			}
+			db.Create(&uk)
+		}
+
+		db.Model(&models.RefreshToken{}).
+			Where("user_id = ? AND revoked_at IS NULL", user.ID).
+			Update("revoked_at", time.Now())
+
+		c.Status(http.StatusNoContent)
+	}
+}
+
 func HandleMe(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, exists := c.Get("user_id")
