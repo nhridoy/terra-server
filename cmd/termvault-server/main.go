@@ -45,6 +45,13 @@ func main() {
 	apiAuth := r.Group("/api/v1/auth")
 	apiAuth.POST("/prelogin", auth.HandlePrelogin(db, cfg))
 	apiAuth.POST("/register", auth.HandleRegister(db, cfg))
+	apiAuth.POST("/login", auth.HandleLogin(db, cfg))
+	apiAuth.POST("/refresh", auth.HandleRefresh(db, cfg))
+	apiAuth.POST("/logout", auth.HandleLogout(db))
+
+	protected := r.Group("/api/v1")
+	protected.Use(auth.JWTMiddleware(cfg))
+	protected.GET("/me", auth.HandleMe(db))
 
 	addr := cfg.Host + ":" + cfg.Port
 
