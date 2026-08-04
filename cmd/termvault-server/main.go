@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gormsqlite "github.com/glebarez/sqlite"
+	"github.com/termvault/termvault/internal/auth"
 	"github.com/termvault/termvault/internal/config"
 	"github.com/termvault/termvault/internal/models"
 	"gorm.io/gorm"
@@ -40,6 +41,10 @@ func main() {
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{"message": "TermVault API"})
 	})
+
+	apiAuth := r.Group("/api/v1/auth")
+	apiAuth.POST("/prelogin", auth.HandlePrelogin(db, cfg))
+	apiAuth.POST("/register", auth.HandleRegister(db, cfg))
 
 	addr := cfg.Host + ":" + cfg.Port
 
