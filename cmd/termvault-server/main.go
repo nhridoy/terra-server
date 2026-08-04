@@ -49,6 +49,10 @@ func main() {
 	apiAuth.POST("/refresh", auth.HandleRefresh(db, cfg))
 	apiAuth.POST("/logout", auth.HandleLogout(db))
 	apiAuth.POST("/recovery", auth.HandleRecovery(db, cfg))
+	apiAuth.GET("/oauth/start/:provider", auth.HandleOAuthStart(db, cfg))
+	apiAuth.GET("/oauth/callback/:provider", auth.HandleOAuthCallback(db, cfg))
+	apiAuth.POST("/oauth/exchange", auth.HandleOAuthExchange(db, cfg))
+	apiAuth.POST("/oauth/setup", auth.HandleOAuthSetup(db, cfg))
 
 	protected := r.Group("/api/v1")
 	protected.Use(auth.JWTMiddleware(cfg))
