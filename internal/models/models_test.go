@@ -94,7 +94,7 @@ func TestUserModel(t *testing.T) {
 	user := User{
 		ID:           uuid.New(),
 		Email:        "test@example.com",
-		Name:         "Test User",
+		FullName:     "Test User",
 		AuthProvider: "password",
 		Initialized:  true,
 	}
@@ -107,7 +107,7 @@ func TestUserModel(t *testing.T) {
 	if err := db.Where("email = ?", "test@example.com").First(&found).Error; err != nil {
 		t.Fatalf("failed to find user: %v", err)
 	}
-	if found.Name != "Test User" {
-		t.Errorf("expected name 'Test User', got '%s'", found.Name)
+	if found.FullName != "Test User" {
+		t.Errorf("expected name 'Test User', got '%s'", found.FullName)
 	}
 }

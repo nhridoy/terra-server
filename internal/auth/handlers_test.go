@@ -67,7 +67,7 @@ func seedUserWithVerifier(t *testing.T, db *gorm.DB, email string) (uuid.UUID, [
 	user := models.User{
 		ID:           userID,
 		Email:        email,
-		Name:         email,
+		FullName:     email,
 		AuthProvider: "password",
 		AuthVerifier: &verifierB64,
 		AuthSalt:     &salt,
@@ -101,7 +101,7 @@ func TestPrelogin_KnownEmail(t *testing.T) {
 	user := models.User{
 		ID:           uuid.New(),
 		Email:        "alice@example.com",
-		Name:         "Alice",
+		FullName:     "Alice",
 		AuthProvider: "password",
 		AuthSalt:     &salt,
 		SaltCL:       &saltCL,
@@ -277,7 +277,7 @@ func TestRegister_ExistingEmail(t *testing.T) {
 	existing := models.User{
 		ID:           uuid.New(),
 		Email:        "taken@example.com",
-		Name:         "Existing",
+		FullName:     "Existing",
 		AuthProvider: "password",
 		AuthSalt:     &salt,
 		SaltCL:       &saltCL,
@@ -318,7 +318,7 @@ func TestRegister_Idempotent(t *testing.T) {
 	existing := models.User{
 		ID:           userID,
 		Email:        "idempotent@example.com",
-		Name:         "Existing",
+		FullName:     "Existing",
 		AuthProvider: "password",
 		AuthSalt:     &salt,
 		SaltCL:       &saltCL,
@@ -680,9 +680,7 @@ func TestPasswordChange_ValidOldProof(t *testing.T) {
 		"new_verifier":  "new-verifier-value",
 		"new_server_salt": "new-server-salt",
 		"new_salt_cl":   "new-salt-cl",
-		"new_kdf_m":     134217728,
-		"new_kdf_t":     4,
-		"new_kdf_p":     2,
+		"new_kdf":       gin.H{"m": 134217728, "t": 4, "p": 2},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password-change", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -738,8 +736,8 @@ func TestPasswordChange_WrongOldProof(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

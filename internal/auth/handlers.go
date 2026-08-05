@@ -18,17 +18,22 @@ type preloginRequest struct {
 	Email string `json:"email" binding:"required"`
 }
 
+type kdfParams struct {
+	M int `json:"m"`
+	T int `json:"t"`
+	P int `json:"p"`
+}
+
 type registerRequest struct {
-	UserID           string `json:"user_id" binding:"required"`
-	Email            string `json:"email" binding:"required"`
-	PasswordHash     string `json:"password_hash" binding:"required"`
-	EncryptedDEK     string `json:"encrypted_dek"`
-	EncryptedPrivkey string `json:"encrypted_privkey"`
-	KDFM             int    `json:"kdf_m"`
-	KDFT             int    `json:"kdf_t"`
-	KDFP             int    `json:"kdf_p"`
-	ServerSalt       string `json:"server_salt" binding:"required"`
-	SaltCL           string `json:"salt_cl" binding:"required"`
+	UserID           string    `json:"user_id" binding:"required"`
+	Email            string    `json:"email" binding:"required"`
+	FullName         string    `json:"full_name"`
+	PasswordHash     string    `json:"password_hash" binding:"required"`
+	EncryptedDEK     string    `json:"encrypted_dek"`
+	EncryptedPrivkey string    `json:"encrypted_privkey"`
+	KDF              kdfParams `json:"kdf"`
+	ServerSalt       string    `json:"server_salt" binding:"required"`
+	SaltCL           string    `json:"salt_cl" binding:"required"`
 }
 
 func HandlePrelogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
@@ -107,17 +112,22 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
+		fullName := req.FullName
+		if fullName == "" {
+			fullName = req.Email
+		}
+
 		user := models.User{
 			ID:           userID,
 			Email:        req.Email,
-			Name:         req.Email,
+			FullName:     fullName,
 			AuthProvider: "password",
 			AuthVerifier: &req.PasswordHash,
 			AuthSalt:     &req.ServerSalt,
 			SaltCL:       &req.SaltCL,
-			KDFM:         req.KDFM,
-			KDFT:         req.KDFT,
-			KDFP:         req.KDFP,
+			KDFM:         req.KDF.M,
+			KDFT:         req.KDF.T,
+			KDFP:         req.KDF.P,
 			Initialized:  true,
 		}
 		if err := db.Create(&user).Error; err != nil {
@@ -304,16 +314,14 @@ func HandleLogout(db *gorm.DB) gin.HandlerFunc {
 }
 
 type passwordChangeRequest struct {
-	OldProof        string `json:"old_proof" binding:"required"`
-	OldNonce        string `json:"old_nonce" binding:"required"`
-	NewVerifier     string `json:"new_verifier" binding:"required"`
-	NewEncryptedDEK string `json:"new_encrypted_dek"`
-	NewNonce        string `json:"new_nonce"`
-	NewKDFM         int    `json:"new_kdf_m"`
-	NewKDFT         int    `json:"new_kdf_t"`
-	NewKDFP         int    `json:"new_kdf_p"`
-	NewServerSalt   string `json:"new_server_salt"`
-	NewSaltCL       string `json:"new_salt_cl"`
+	OldProof        string    `json:"old_proof" binding:"required"`
+	OldNonce        string    `json:"old_nonce" binding:"required"`
+	NewVerifier     string    `json:"new_verifier" binding:"required"`
+	NewEncryptedDEK string    `json:"new_encrypted_dek"`
+	NewNonce        string    `json:"new_nonce"`
+	NewKDF          kdfParams `json:"new_kdf"`
+	NewServerSalt   string    `json:"new_server_salt"`
+	NewSaltCL       string    `json:"new_salt_cl"`
 }
 
 func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
@@ -359,7 +367,7 @@ func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 
 		expectedProof := GenerateProof(verifierBytes, oldNonceBytes)
 		if !ConstantTimeCompare(oldProofBytes, expectedProof) {
-			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "old proof verification failed")
+			Error(c, http.StatusForbidden, "FORBIDDEN", "current password is incorrect")
 			return
 		}
 
@@ -372,21 +380,21 @@ func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		if req.NewSaltCL != "" {
 			updates["salt_cl"] = req.NewSaltCL
 		}
-		if req.NewKDFM != 0 {
-			user.KDFM = req.NewKDFM
-		}
-		if req.NewKDFT != 0 {
-			user.KDFT = req.NewKDFT
-		}
-		if req.NewKDFP != 0 {
-			user.KDFP = req.NewKDFP
-		}
 		user.AuthVerifier = &req.NewVerifier
 		if req.NewServerSalt != "" {
 			user.AuthSalt = &req.NewServerSalt
 		}
 		if req.NewSaltCL != "" {
 			user.SaltCL = &req.NewSaltCL
+		}
+		if req.NewKDF.M != 0 {
+			user.KDFM = req.NewKDF.M
+		}
+		if req.NewKDF.T != 0 {
+			user.KDFT = req.NewKDF.T
+		}
+		if req.NewKDF.P != 0 {
+			user.KDFP = req.NewKDF.P
 		}
 		if err := db.Save(&user).Error; err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to update user")
@@ -416,16 +424,14 @@ func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 }
 
 type recoveryRequest struct {
-	RecoveryCode    string `json:"recovery_code" binding:"required"`
-	Signature       string `json:"signature" binding:"required"`
-	NewVerifier     string `json:"new_verifier" binding:"required"`
-	NewEncryptedDEK string `json:"new_encrypted_dek"`
-	NewNonce        string `json:"new_nonce"`
-	NewKDFM         int    `json:"new_kdf_m"`
-	NewKDFT         int    `json:"new_kdf_t"`
-	NewKDFP         int    `json:"new_kdf_p"`
-	NewServerSalt   string `json:"new_server_salt"`
-	NewSaltCL       string `json:"new_salt_cl"`
+	RecoveryCode    string    `json:"recovery_code" binding:"required"`
+	Signature       string    `json:"signature" binding:"required"`
+	NewVerifier     string    `json:"new_verifier" binding:"required"`
+	NewEncryptedDEK string    `json:"new_encrypted_dek"`
+	NewNonce        string    `json:"new_nonce"`
+	NewKDF          kdfParams `json:"new_kdf"`
+	NewServerSalt   string    `json:"new_server_salt"`
+	NewSaltCL       string    `json:"new_salt_cl"`
 }
 
 func HandleRecovery(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
@@ -468,14 +474,14 @@ func HandleRecovery(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		if req.NewSaltCL != "" {
 			user.SaltCL = &req.NewSaltCL
 		}
-		if req.NewKDFM != 0 {
-			user.KDFM = req.NewKDFM
+		if req.NewKDF.M != 0 {
+			user.KDFM = req.NewKDF.M
 		}
-		if req.NewKDFT != 0 {
-			user.KDFT = req.NewKDFT
+		if req.NewKDF.T != 0 {
+			user.KDFT = req.NewKDF.T
 		}
-		if req.NewKDFP != 0 {
-			user.KDFP = req.NewKDFP
+		if req.NewKDF.P != 0 {
+			user.KDFP = req.NewKDF.P
 		}
 		if err := db.Save(&user).Error; err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to update user")

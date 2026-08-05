@@ -252,7 +252,7 @@ func HandleOAuthCallback(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 				user = models.User{
 					ID:           uuid.New(),
 					Email:        ui.Email,
-					Name:         ui.Name,
+					FullName:     ui.Name,
 					AuthProvider: provider,
 					ProviderSub:  &providerSub,
 					Initialized:  false,

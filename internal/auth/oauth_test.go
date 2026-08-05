@@ -79,7 +79,7 @@ func seedOAuthUser(t *testing.T, db *gorm.DB, provider, providerSub, email strin
 	user := models.User{
 		ID:           userID,
 		Email:        email,
-		Name:         email,
+		FullName:     email,
 		AuthProvider: provider,
 		ProviderSub:  &providerSub,
 		Initialized:  initialized,
