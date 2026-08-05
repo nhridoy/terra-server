@@ -68,7 +68,7 @@ func HandlePrelogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			"nonce":       nonce,
 			"kdf":         kdf,
 			"server_salt": randHex(32),
-			"salt_cl":     randHex(32),
+			"salt_cl":     randHex(16),
 		})
 	}
 }
