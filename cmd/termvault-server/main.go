@@ -38,6 +38,8 @@ func main() {
 
 	r := gin.Default()
 
+	r.Use(auth.CORS())
+
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{"message": "TermVault API"})
 	})
