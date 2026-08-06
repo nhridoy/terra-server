@@ -24,16 +24,25 @@ type kdfParams struct {
 	P int `json:"p"`
 }
 
+type keyringPayload struct {
+	DekWrappedByKek        string `json:"dek_wrapped_by_kek"`
+	DekWrappedByRecovery   string `json:"dek_wrapped_by_recovery"`
+	PrivateKeyWrappedByDek string `json:"private_key_wrapped_by_dek"`
+}
+
 type registerRequest struct {
-	UserID           string    `json:"user_id" binding:"required"`
-	Email            string    `json:"email" binding:"required"`
-	FullName         string    `json:"full_name"`
-	PasswordHash     string    `json:"password_hash" binding:"required"`
-	EncryptedDEK     string    `json:"encrypted_dek"`
-	EncryptedPrivkey string    `json:"encrypted_privkey"`
-	KDF              kdfParams `json:"kdf"`
-	ServerSalt       string    `json:"server_salt" binding:"required"`
-	SaltCL           string    `json:"salt_cl" binding:"required"`
+	UserID           string         `json:"user_id" binding:"required"`
+	Email            string         `json:"email" binding:"required"`
+	FullName         string         `json:"full_name"`
+	PasswordHash     string         `json:"password_hash" binding:"required"`
+	EncryptedDEK     string         `json:"encrypted_dek"`
+	EncryptedPrivkey string         `json:"encrypted_privkey"`
+	RecoveryCode     string         `json:"recovery_code"`
+	PublicKey        string         `json:"public_key"`
+	Keyring          keyringPayload `json:"keyring"`
+	KDF              kdfParams      `json:"kdf"`
+	ServerSalt       string         `json:"server_salt" binding:"required"`
+	SaltCL           string         `json:"salt_cl" binding:"required"`
 }
 
 func HandlePrelogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
@@ -117,6 +126,23 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			fullName = req.Email
 		}
 
+		var recoveryHash *string
+		if req.RecoveryCode != "" {
+			codeBytes, err := base64.RawStdEncoding.DecodeString(req.RecoveryCode)
+			if err != nil {
+				Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid recovery_code encoding")
+				return
+			}
+			codeHash := sha256.Sum256(codeBytes)
+			hash := base64.RawStdEncoding.EncodeToString(codeHash[:])
+			recoveryHash = &hash
+		}
+
+		var publicKey *string
+		if req.PublicKey != "" {
+			publicKey = &req.PublicKey
+		}
+
 		user := models.User{
 			ID:           userID,
 			Email:        req.Email,
@@ -128,10 +154,17 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			KDFM:         req.KDF.M,
 			KDFT:         req.KDF.T,
 			KDFP:         req.KDF.P,
+			PublicKey:    publicKey,
+			RecoveryHash: recoveryHash,
 			Initialized:  true,
 		}
 		if err := db.Create(&user).Error; err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create user")
+			return
+		}
+
+		if err := seedKeyring(db, userID, req.Keyring); err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to store keyring")
 			return
 		}
 
@@ -155,11 +188,11 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 }
 
 type loginRequest struct {
-	Email         string `json:"email" binding:"required"`
-	Proof         string `json:"proof" binding:"required"`
-	Nonce         string `json:"nonce" binding:"required"`
-	DeviceID      string `json:"device_id"`
-	ClientPubkey  string `json:"client_pubkey"`
+	Email        string `json:"email" binding:"required"`
+	Proof        string `json:"proof" binding:"required"`
+	Nonce        string `json:"nonce" binding:"required"`
+	DeviceID     string `json:"device_id"`
+	ClientPubkey string `json:"client_pubkey"`
 }
 
 func HandleLogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
@@ -218,17 +251,13 @@ func HandleLogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		var keyringBlob *string
-		var uk models.UserKey
-		if db.Where("user_id = ? AND key_type = ?", user.ID, "keyring").First(&uk).Error == nil {
-			keyringBlob = &uk.Payload
-		}
+		keyring := fetchKeyring(db, user.ID)
 
 		Success(c, http.StatusOK, gin.H{
 			"access_token":  at,
 			"refresh_token": rtToken,
 			"user":          user,
-			"keyring":       keyringBlob,
+			"keyring":       keyring,
 		})
 	}
 }
@@ -267,8 +296,8 @@ func HandleRefresh(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 
 		now := time.Now()
 		db.Model(&rt).Updates(map[string]interface{}{
-			"revoked_at":  &now,
-			"rotated_at":  &now,
+			"revoked_at": &now,
+			"rotated_at": &now,
 		})
 
 		newRT, err := createRefreshToken(db, rt.UserID, rt.DeviceID, cfg)
@@ -402,17 +431,7 @@ func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		if req.NewEncryptedDEK != "" {
-			var uk models.UserKey
-			if db.Where("user_id = ? AND key_type = ?", user.ID, "dek").First(&uk).Error == nil {
-				db.Model(&uk).Update("payload", req.NewEncryptedDEK)
-			} else {
-				uk = models.UserKey{
-					UserID:  user.ID,
-					KeyType: "dek",
-					Payload: req.NewEncryptedDEK,
-				}
-				db.Create(&uk)
-			}
+			upsertUserKey(db, user.ID, "dek_wrapped_by_kek", req.NewEncryptedDEK)
 		}
 
 		db.Model(&models.RefreshToken{}).
@@ -424,14 +443,16 @@ func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 }
 
 type recoveryRequest struct {
-	RecoveryCode    string    `json:"recovery_code" binding:"required"`
-	Signature       string    `json:"signature" binding:"required"`
-	NewVerifier     string    `json:"new_verifier" binding:"required"`
-	NewEncryptedDEK string    `json:"new_encrypted_dek"`
-	NewNonce        string    `json:"new_nonce"`
-	NewKDF          kdfParams `json:"new_kdf"`
-	NewServerSalt   string    `json:"new_server_salt"`
-	NewSaltCL       string    `json:"new_salt_cl"`
+	RecoveryCode            string    `json:"recovery_code" binding:"required"`
+	Signature               string    `json:"signature" binding:"required"`
+	NewRecoveryCode         string    `json:"new_recovery_code"`
+	NewVerifier             string    `json:"new_verifier" binding:"required"`
+	NewEncryptedDEK         string    `json:"new_encrypted_dek"`
+	NewDekWrappedByRecovery string    `json:"new_dek_wrapped_by_recovery"`
+	NewNonce                string    `json:"new_nonce"`
+	NewKDF                  kdfParams `json:"new_kdf"`
+	NewServerSalt           string    `json:"new_server_salt"`
+	NewSaltCL               string    `json:"new_salt_cl"`
 }
 
 func HandleRecovery(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
@@ -467,7 +488,18 @@ func HandleRecovery(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		user.AuthVerifier = &req.NewVerifier
-		user.RecoveryHash = nil
+		if req.NewRecoveryCode != "" {
+			newCodeBytes, err := base64.RawStdEncoding.DecodeString(req.NewRecoveryCode)
+			if err != nil {
+				Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid new recovery code")
+				return
+			}
+			newCodeHash := sha256.Sum256(newCodeBytes)
+			newHashB64 := base64.RawStdEncoding.EncodeToString(newCodeHash[:])
+			user.RecoveryHash = &newHashB64
+		} else {
+			user.RecoveryHash = nil
+		}
 		if req.NewServerSalt != "" {
 			user.AuthSalt = &req.NewServerSalt
 		}
@@ -489,13 +521,10 @@ func HandleRecovery(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		if req.NewEncryptedDEK != "" {
-			db.Where("user_id = ? AND key_type = ?", user.ID, "dek").Delete(&models.UserKey{})
-			uk := models.UserKey{
-				UserID:  user.ID,
-				KeyType: "dek",
-				Payload: req.NewEncryptedDEK,
-			}
-			db.Create(&uk)
+			upsertUserKey(db, user.ID, "dek_wrapped_by_kek", req.NewEncryptedDEK)
+		}
+		if req.NewDekWrappedByRecovery != "" {
+			upsertUserKey(db, user.ID, "dek_wrapped_by_recovery", req.NewDekWrappedByRecovery)
 		}
 
 		db.Model(&models.RefreshToken{}).
@@ -503,6 +532,106 @@ func HandleRecovery(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			Update("revoked_at", time.Now())
 
 		c.Status(http.StatusNoContent)
+	}
+}
+
+type recoveryPrefetchRequest struct {
+	RecoveryCode string `json:"recovery_code" binding:"required"`
+}
+
+var keyringKeyTypes = []string{
+	"dek_wrapped_by_kek",
+	"dek_wrapped_by_recovery",
+	"private_key_wrapped_by_dek",
+}
+
+func seedKeyring(db *gorm.DB, userID uuid.UUID, kr keyringPayload) error {
+	rows := map[string]string{
+		"dek_wrapped_by_kek":         kr.DekWrappedByKek,
+		"dek_wrapped_by_recovery":    kr.DekWrappedByRecovery,
+		"private_key_wrapped_by_dek": kr.PrivateKeyWrappedByDek,
+	}
+	for keyType, payload := range rows {
+		if payload == "" {
+			continue
+		}
+		if err := upsertUserKey(db, userID, keyType, payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func upsertUserKey(db *gorm.DB, userID uuid.UUID, keyType, payload string) error {
+	var uk models.UserKey
+	err := db.Where("user_id = ? AND key_type = ?", userID, keyType).First(&uk).Error
+	if err == nil {
+		return db.Model(&uk).Update("payload", payload).Error
+	}
+	if err != gorm.ErrRecordNotFound {
+		return err
+	}
+	return db.Create(&models.UserKey{
+		UserID:  userID,
+		KeyType: keyType,
+		Payload: payload,
+	}).Error
+}
+
+func fetchKeyring(db *gorm.DB, userID uuid.UUID) *map[string]string {
+	keyring := map[string]string{}
+	var rows []models.UserKey
+	db.Where("user_id = ? AND key_type IN ?", userID, keyringKeyTypes).Find(&rows)
+	for _, r := range rows {
+		keyring[r.KeyType] = r.Payload
+	}
+	if len(keyring) == 0 {
+		return nil
+	}
+	return &keyring
+}
+
+func HandleRecoveryPrefetch(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req recoveryPrefetchRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "recovery_code is required")
+			return
+		}
+
+		recoveryCodeBytes, err := base64.RawStdEncoding.DecodeString(req.RecoveryCode)
+		if err != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid recovery code")
+			return
+		}
+		codeHash := sha256.Sum256(recoveryCodeBytes)
+		codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
+
+		var user models.User
+		if db.Where("recovery_hash = ?", codeHashB64).First(&user).Error != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid recovery code")
+			return
+		}
+
+		var uk models.UserKey
+		if db.Where("user_id = ? AND key_type = ?", user.ID, "dek_wrapped_by_recovery").First(&uk).Error != nil {
+			Error(c, http.StatusNotFound, "NOT_FOUND", "no recovery data for this account")
+			return
+		}
+
+		nonce := randBytes(32)
+		Success(c, http.StatusOK, gin.H{
+			"nonce": nonce,
+			"email": user.Email,
+			"kdf": map[string]interface{}{
+				"m": user.KDFM,
+				"t": user.KDFT,
+				"p": user.KDFP,
+			},
+			"server_salt":             deref(user.AuthSalt),
+			"salt_cl":                 deref(user.SaltCL),
+			"dek_wrapped_by_recovery": uk.Payload,
+		})
 	}
 }
 

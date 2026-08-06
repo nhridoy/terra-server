@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	gormsqlite "github.com/glebarez/sqlite"
 	"github.com/google/uuid"
 	"github.com/termvault/termvault/internal/config"
 	"github.com/termvault/termvault/internal/models"
-	gormsqlite "github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -41,6 +41,7 @@ func setupHandlerRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	auth.POST("/refresh", HandleRefresh(db, cfg))
 	auth.POST("/logout", HandleLogout(db))
 	auth.POST("/recovery", HandleRecovery(db, cfg))
+	auth.POST("/recovery/prefetch", HandleRecoveryPrefetch(db))
 
 	protected := r.Group("/api/v1")
 	protected.Use(JWTMiddleware(cfg))
@@ -51,8 +52,8 @@ func setupHandlerRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 
 func testConfig() *config.Config {
 	return &config.Config{
-		JWTSecret:         "test-secret-key",
-		JWTExpiry:         15 * 60e9,
+		JWTSecret:          "test-secret-key",
+		JWTExpiry:          15 * 60e9,
 		RefreshTokenExpiry: 30 * 24 * 60e9,
 	}
 }
@@ -218,16 +219,16 @@ func TestRegister_NewUser(t *testing.T) {
 
 	userID := uuid.New()
 	body, _ := json.Marshal(gin.H{
-		"user_id":          userID.String(),
-		"email":            "bob@example.com",
-		"password_hash":    "base64-verifier",
-		"encrypted_dek":    "base64-dek",
+		"user_id":           userID.String(),
+		"email":             "bob@example.com",
+		"password_hash":     "base64-verifier",
+		"encrypted_dek":     "base64-dek",
 		"encrypted_privkey": "base64-privkey",
-		"kdf_m":            67108864,
-		"kdf_t":            3,
-		"kdf_p":            1,
-		"server_salt":      "server-salt",
-		"salt_cl":          "client-salt",
+		"kdf_m":             67108864,
+		"kdf_t":             3,
+		"kdf_p":             1,
+		"server_salt":       "server-salt",
+		"salt_cl":           "client-salt",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -358,6 +359,143 @@ func TestRegister_Idempotent(t *testing.T) {
 	}
 }
 
+func TestRegister_StoresKeyringAndRecovery(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	userID := uuid.New()
+	recoveryCode := "recovery-code-123"
+	body, _ := json.Marshal(gin.H{
+		"user_id":       userID.String(),
+		"email":         "keyring@example.com",
+		"password_hash": "base64-verifier",
+		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
+		"public_key":    "base64-public-key",
+		"keyring": gin.H{
+			"dek_wrapped_by_kek":         "dek-a",
+			"dek_wrapped_by_recovery":    "dek-b",
+			"private_key_wrapped_by_dek": "priv-c",
+		},
+		"kdf_m":       67108864,
+		"kdf_t":       3,
+		"kdf_p":       1,
+		"server_salt": "server-salt",
+		"salt_cl":     "client-salt",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var user models.User
+	if err := db.Where("id = ?", userID).First(&user).Error; err != nil {
+		t.Fatalf("user not found: %v", err)
+	}
+	if user.PublicKey == nil || *user.PublicKey != "base64-public-key" {
+		t.Errorf("public_key not stored: %v", user.PublicKey)
+	}
+	expectedCodeHash := sha256.Sum256([]byte(recoveryCode))
+	expectedB64 := base64.RawStdEncoding.EncodeToString(expectedCodeHash[:])
+	if user.RecoveryHash == nil || *user.RecoveryHash != expectedB64 {
+		t.Errorf("recovery_hash: want %q, got %v", expectedB64, user.RecoveryHash)
+	}
+
+	var count int64
+	db.Model(&models.UserKey{}).Where("user_id = ?", userID).Count(&count)
+	if count != 3 {
+		t.Fatalf("expected 3 keyring rows, got %d", count)
+	}
+
+	loginBody, _ := json.Marshal(gin.H{
+		"email":     "keyring@example.com",
+		"proof":     base64.RawStdEncoding.EncodeToString([]byte("dummy")),
+		"nonce":     base64.RawStdEncoding.EncodeToString([]byte("dummy")),
+		"device_id": "dev-1",
+	})
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	r.ServeHTTP(loginW, loginReq)
+
+	// wrong proof → 401, keyring should still echo once a valid login succeeds
+	if loginW.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with bad proof, got %d", loginW.Code)
+	}
+}
+
+func TestRecoveryPrefetch(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, _ := seedUserWithVerifier(t, db, "prefetch@example.com")
+	recoveryCode := "prefetch-code"
+	codeHash := sha256.Sum256([]byte(recoveryCode))
+	codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
+	db.Model(&models.User{}).Where("id = ?", uid).Update("recovery_hash", codeHashB64)
+
+	saltCL := "prefetch-salt-cl"
+	db.Model(&models.User{}).Where("id = ?", uid).Update("salt_cl", saltCL)
+	db.Create(&models.UserKey{
+		UserID:  uid,
+		KeyType: "dek_wrapped_by_recovery",
+		Payload: "wrapped-recovery-dek",
+	})
+
+	body, _ := json.Marshal(gin.H{
+		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery/prefetch", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	data := resp["data"].(map[string]interface{})
+	if data["salt_cl"] != saltCL {
+		t.Errorf("salt_cl: want %q, got %v", saltCL, data["salt_cl"])
+	}
+	if data["email"] != "prefetch@example.com" {
+		t.Errorf("email: want %q, got %v", "prefetch@example.com", data["email"])
+	}
+	if data["dek_wrapped_by_recovery"] != "wrapped-recovery-dek" {
+		t.Errorf("dek_wrapped_by_recovery: want wrapped-recovery-dek, got %v", data["dek_wrapped_by_recovery"])
+	}
+	if data["nonce"] == nil || data["nonce"] == "" {
+		t.Error("nonce should be present")
+	}
+}
+
+func TestRecoveryPrefetch_InvalidCode(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	body, _ := json.Marshal(gin.H{
+		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte("wrong-code")),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery/prefetch", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestRegister_InvalidBody(t *testing.T) {
 	db := setupTestDB(t)
 	cfg := testConfig()
@@ -383,9 +521,9 @@ func TestLogin_CorrectProof(t *testing.T) {
 	proof := GenerateProof(verifier, nonce)
 
 	body, _ := json.Marshal(gin.H{
-		"email":    "alice@example.com",
-		"proof":    base64.RawStdEncoding.EncodeToString(proof),
-		"nonce":    base64.RawStdEncoding.EncodeToString(nonce),
+		"email":     "alice@example.com",
+		"proof":     base64.RawStdEncoding.EncodeToString(proof),
+		"nonce":     base64.RawStdEncoding.EncodeToString(nonce),
 		"device_id": "device-1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(body))
@@ -675,12 +813,12 @@ func TestPasswordChange_ValidOldProof(t *testing.T) {
 	proof := GenerateProof(verifier, nonce)
 
 	body, _ := json.Marshal(gin.H{
-		"old_proof":     base64.RawStdEncoding.EncodeToString(proof),
-		"old_nonce":     base64.RawStdEncoding.EncodeToString(nonce),
-		"new_verifier":  "new-verifier-value",
+		"old_proof":       base64.RawStdEncoding.EncodeToString(proof),
+		"old_nonce":       base64.RawStdEncoding.EncodeToString(nonce),
+		"new_verifier":    "new-verifier-value",
 		"new_server_salt": "new-server-salt",
-		"new_salt_cl":   "new-salt-cl",
-		"new_kdf":       gin.H{"m": 134217728, "t": 4, "p": 2},
+		"new_salt_cl":     "new-salt-cl",
+		"new_kdf":         gin.H{"m": 134217728, "t": 4, "p": 2},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password-change", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -817,12 +955,16 @@ func TestRecovery_ValidSignature(t *testing.T) {
 	codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
 	db.Model(&models.User{}).Where("id = ?", uid).Update("recovery_hash", codeHashB64)
 
+	newCode := "brand-new-recovery-code"
 	body, _ := json.Marshal(gin.H{
-		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
-		"signature":     base64.RawStdEncoding.EncodeToString([]byte("valid-sig")),
-		"new_verifier":  "recovered-verifier",
-		"new_server_salt": "recovered-salt",
-		"new_salt_cl":   "recovered-salt-cl",
+		"recovery_code":               base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
+		"signature":                   base64.RawStdEncoding.EncodeToString([]byte("valid-sig")),
+		"new_recovery_code":           base64.RawStdEncoding.EncodeToString([]byte(newCode)),
+		"new_verifier":                "recovered-verifier",
+		"new_encrypted_dek":           "new-dek-wrap",
+		"new_dek_wrapped_by_recovery": "new-recovery-wrap",
+		"new_server_salt":             "recovered-salt",
+		"new_salt_cl":                 "recovered-salt-cl",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -838,8 +980,54 @@ func TestRecovery_ValidSignature(t *testing.T) {
 	if user.AuthVerifier == nil || *user.AuthVerifier != "recovered-verifier" {
 		t.Errorf("verifier not updated: got %v", user.AuthVerifier)
 	}
+	expectedNewHash := sha256.Sum256([]byte(newCode))
+	expectedNewHashB64 := base64.RawStdEncoding.EncodeToString(expectedNewHash[:])
+	if user.RecoveryHash == nil || *user.RecoveryHash != expectedNewHashB64 {
+		t.Errorf("recovery_hash should rotate to the new code, got %v, want %s", user.RecoveryHash, expectedNewHashB64)
+	}
+
+	var uk models.UserKey
+	if err := db.Where("user_id = ? AND key_type = ?", uid, "dek_wrapped_by_recovery").First(&uk).Error; err != nil {
+		t.Errorf("dek_wrapped_by_recovery row should exist after rotation: %v", err)
+	} else if uk.Payload != "new-recovery-wrap" {
+		t.Errorf("dek_wrapped_by_recovery payload: want %q, got %q", "new-recovery-wrap", uk.Payload)
+	}
+}
+
+func TestRecovery_NoNewCodeConsumesOld(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, _ := seedUserWithVerifier(t, db, "recovery-consume@example.com")
+	recoveryCode := "consume-me-code"
+	codeHash := sha256.Sum256([]byte(recoveryCode))
+	codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
+	db.Model(&models.User{}).Where("id = ?", uid).Update("recovery_hash", codeHashB64)
+
+	body, _ := json.Marshal(gin.H{
+		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
+		"signature":     base64.RawStdEncoding.EncodeToString([]byte("valid-sig")),
+		"new_verifier":  "recovered-verifier",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var user models.User
+	db.Where("id = ?", uid).First(&user)
 	if user.RecoveryHash != nil {
-		t.Errorf("recovery_hash should be cleared after use, got %v", user.RecoveryHash)
+		t.Errorf("recovery_hash should be cleared when no new code is issued, got %v", user.RecoveryHash)
+	}
+
+	var uk models.UserKey
+	if err := db.Where("user_id = ? AND key_type = ?", uid, "dek_wrapped_by_recovery").First(&uk).Error; err != gorm.ErrRecordNotFound {
+		t.Errorf("expected no dek_wrapped_by_recovery row when not rotated, got %v", err)
 	}
 }
 
@@ -909,14 +1097,14 @@ func TestRecovery_ReplacesKeyring(t *testing.T) {
 
 	db.Create(&models.UserKey{
 		UserID:  uid,
-		KeyType: "dek",
+		KeyType: "dek_wrapped_by_kek",
 		Payload: "old-dek-payload",
 	})
 
 	body, _ := json.Marshal(gin.H{
-		"recovery_code":    base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
-		"signature":        base64.RawStdEncoding.EncodeToString([]byte("sig")),
-		"new_verifier":     "recovered-v",
+		"recovery_code":     base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
+		"signature":         base64.RawStdEncoding.EncodeToString([]byte("sig")),
+		"new_verifier":      "recovered-v",
 		"new_encrypted_dek": "new-dek-payload",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery", bytes.NewReader(body))
@@ -929,8 +1117,8 @@ func TestRecovery_ReplacesKeyring(t *testing.T) {
 	}
 
 	var uk models.UserKey
-	if db.Where("user_id = ? AND key_type = ?", uid, "dek").First(&uk).Error != nil {
-		t.Fatal("dek key should exist after recovery")
+	if db.Where("user_id = ? AND key_type = ?", uid, "dek_wrapped_by_kek").First(&uk).Error != nil {
+		t.Fatal("dek_wrapped_by_kek key should exist after recovery")
 	}
 	if uk.Payload != "new-dek-payload" {
 		t.Errorf("dek payload: want new-dek-payload, got %s", uk.Payload)
