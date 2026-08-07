@@ -105,19 +105,7 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		var existing models.User
 		if db.Where("id = ?", userID).First(&existing).Error == nil {
 			if cfg.RequireEmailVerification && existing.EmailVerifiedAt == nil {
-				otp, err := issueEmailVerifyCode(db, userID)
-				if err != nil {
-					Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create verification code")
-					return
-				}
-				sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom)
-				if err := sender.SendOtp(existing.Email, otp); err != nil {
-					slog.Error("failed to send verification otp", "email", existing.Email, "error", err)
-				}
-				Success(c, http.StatusCreated, gin.H{
-					"verification_required": true,
-					"user":                  existing,
-				})
+				respondVerificationRequired(c, db, cfg, &existing)
 				return
 			}
 			rt, err := createRefreshToken(db, userID, "", cfg)
@@ -196,19 +184,7 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		if cfg.RequireEmailVerification {
-			otp, err := issueEmailVerifyCode(db, userID)
-			if err != nil {
-				Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create verification code")
-				return
-			}
-			sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom)
-			if err := sender.SendOtp(user.Email, otp); err != nil {
-				slog.Error("failed to send verification otp", "email", user.Email, "error", err)
-			}
-			Success(c, http.StatusCreated, gin.H{
-				"verification_required": true,
-				"user":                  user,
-			})
+			respondVerificationRequired(c, db, cfg, &user)
 			return
 		}
 
@@ -230,6 +206,22 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			"user":          user,
 		})
 	}
+}
+
+func respondVerificationRequired(c *gin.Context, db *gorm.DB, cfg *config.Config, user *models.User) {
+	otp, err := issueEmailVerifyCode(db, user.ID)
+	if err != nil {
+		Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create verification code")
+		return
+	}
+	sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom)
+	if err := sender.SendOtp(user.Email, otp); err != nil {
+		slog.Error("failed to send verification otp", "email", user.Email, "error", err)
+	}
+	Success(c, http.StatusCreated, gin.H{
+		"verification_required": true,
+		"user":                  user,
+	})
 }
 
 type loginRequest struct {
