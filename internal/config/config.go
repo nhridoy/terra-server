@@ -10,23 +10,29 @@ import (
 )
 
 type Config struct {
-	Port              string
-	Host              string
-	DatabaseURL       string
-	JWTSecret         string
-	JWTExpiry         time.Duration
-	RefreshTokenExpiry time.Duration
-	BaseURL           string
-	OAuthGoogleID     string
-	OAuthGoogleSecret string
-	OAuthGitHubID     string
-	OAuthGitHubSecret string
-	OAuthRedirectBase string
-	OAuthRedirectURIs []string
-	AppScheme         string
-	RateLimitAuth     int
-	RateLimitAPI      int
-	TrustedProxies    []string
+	Port                     string
+	Host                     string
+	DatabaseURL              string
+	JWTSecret                string
+	JWTExpiry                time.Duration
+	RefreshTokenExpiry       time.Duration
+	BaseURL                  string
+	OAuthGoogleID            string
+	OAuthGoogleSecret        string
+	OAuthGitHubID            string
+	OAuthGitHubSecret        string
+	OAuthRedirectBase        string
+	OAuthRedirectURIs        []string
+	AppScheme                string
+	RateLimitAuth            int
+	RateLimitAPI             int
+	TrustedProxies           []string
+	RequireEmailVerification bool
+	SMTPHost                 string
+	SMTPPort                 int
+	SMTPUsername             string
+	SMTPPassword             string
+	SMTPFrom                 string
 }
 
 func Load() *Config {
@@ -36,21 +42,21 @@ func Load() *Config {
 	rateLimitAPI := 30
 
 	cfg := &Config{
-		Port:              getEnv("TERMVAULT_PORT", "8080"),
-		Host:              getEnv("TERMVAULT_HOST", "0.0.0.0"),
-		DatabaseURL:       getEnv("DATABASE_URL", "sqlite://termvault.db"),
-		JWTSecret:         os.Getenv("JWT_SECRET"),
-		JWTExpiry:         parseDuration(getEnv("JWT_EXPIRY", "15m")),
+		Port:               getEnv("TERMVAULT_PORT", "8080"),
+		Host:               getEnv("TERMVAULT_HOST", "0.0.0.0"),
+		DatabaseURL:        getEnv("DATABASE_URL", "sqlite://termvault.db"),
+		JWTSecret:          os.Getenv("JWT_SECRET"),
+		JWTExpiry:          parseDuration(getEnv("JWT_EXPIRY", "15m")),
 		RefreshTokenExpiry: parseDuration(getEnv("REFRESH_TOKEN_EXPIRY", "720h")),
-		BaseURL:           getEnv("BASE_URL", "http://localhost:8080"),
-		OAuthGoogleID:     os.Getenv("OAUTH_GOOGLE_CLIENT_ID"),
-		OAuthGoogleSecret: os.Getenv("OAUTH_GOOGLE_CLIENT_SECRET"),
-		OAuthGitHubID:     os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
-		OAuthGitHubSecret: os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
-		OAuthRedirectBase: getEnv("OAUTH_REDIRECT_BASE", getEnv("BASE_URL", "http://localhost:8080")),
-		AppScheme:         getEnv("APP_SCHEME", "termvault"),
-		RateLimitAuth:     rateLimitAuth,
-		RateLimitAPI:      rateLimitAPI,
+		BaseURL:            getEnv("BASE_URL", "http://localhost:8080"),
+		OAuthGoogleID:      os.Getenv("OAUTH_GOOGLE_CLIENT_ID"),
+		OAuthGoogleSecret:  os.Getenv("OAUTH_GOOGLE_CLIENT_SECRET"),
+		OAuthGitHubID:      os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
+		OAuthGitHubSecret:  os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
+		OAuthRedirectBase:  getEnv("OAUTH_REDIRECT_BASE", getEnv("BASE_URL", "http://localhost:8080")),
+		AppScheme:          getEnv("APP_SCHEME", "termvault"),
+		RateLimitAuth:      rateLimitAuth,
+		RateLimitAPI:       rateLimitAPI,
 	}
 
 	if v := os.Getenv("RATE_LIMIT_AUTH"); v != "" {
@@ -63,6 +69,18 @@ func Load() *Config {
 			cfg.RateLimitAPI = n
 		}
 	}
+
+	cfg.RequireEmailVerification = parseBoolEnv("REQUIRE_EMAIL_VERIFICATION", false)
+	cfg.SMTPHost = os.Getenv("SMTP_HOST")
+	cfg.SMTPPort = 587
+	if v := os.Getenv("SMTP_PORT"); v != "" {
+		if n, err := parseIntSafe(v, 587); err == nil {
+			cfg.SMTPPort = n
+		}
+	}
+	cfg.SMTPUsername = os.Getenv("SMTP_USERNAME")
+	cfg.SMTPPassword = os.Getenv("SMTP_PASSWORD")
+	cfg.SMTPFrom = os.Getenv("SMTP_FROM")
 
 	if v := os.Getenv("TRUSTED_PROXIES"); v != "" {
 		for _, cidr := range strings.Split(v, ",") {
@@ -110,4 +128,15 @@ func parseIntSafe(s string, fallback int) (int, error) {
 		return fallback, err
 	}
 	return n, nil
+}
+
+func parseBoolEnv(key string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "true", "1", "yes":
+		return true
+	case "false", "0", "no":
+		return false
+	}
+	return fallback
 }

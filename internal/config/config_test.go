@@ -23,6 +23,30 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.RateLimitAPI != 30 {
 		t.Errorf("expected default rate limit API 30, got %d", cfg.RateLimitAPI)
 	}
+	if cfg.RequireEmailVerification {
+		t.Errorf("expected email verification off by default")
+	}
+	if cfg.SMTPPort != 587 {
+		t.Errorf("expected default SMTP port 587, got %d", cfg.SMTPPort)
+	}
+}
+
+func TestLoadEmailVerificationToggle(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"true", true}, {"TRUE", true}, {"1", true}, {"yes", true},
+		{"false", false}, {"0", false}, {"", false}, {"banana", false},
+	}
+	for _, c := range cases {
+		os.Setenv("REQUIRE_EMAIL_VERIFICATION", c.val)
+		cfg := Load()
+		if cfg.RequireEmailVerification != c.want {
+			t.Errorf("REQUIRE_EMAIL_VERIFICATION=%q: got %v want %v", c.val, cfg.RequireEmailVerification, c.want)
+		}
+	}
+	os.Unsetenv("REQUIRE_EMAIL_VERIFICATION")
 }
 
 func TestLoadEnvOverrides(t *testing.T) {
