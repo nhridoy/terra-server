@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -35,8 +36,6 @@ type registerRequest struct {
 	Email            string         `json:"email" binding:"required"`
 	FullName         string         `json:"full_name"`
 	PasswordHash     string         `json:"password_hash" binding:"required"`
-	EncryptedDEK     string         `json:"encrypted_dek"`
-	EncryptedPrivkey string         `json:"encrypted_privkey"`
 	RecoveryCode     string         `json:"recovery_code"`
 	PublicKey        string         `json:"public_key"`
 	Keyring          keyringPayload `json:"keyring"`
@@ -73,9 +72,9 @@ func HandlePrelogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		kdf := map[string]interface{}{
-			"m": randInt(32, 268435456),
-			"t": randInt(1, 16),
-			"p": randInt(1, 8),
+			"m": 32768,
+			"t": 2,
+			"p": 1,
 		}
 		nonce := randBytes(32)
 		Success(c, http.StatusOK, gin.H{
@@ -445,8 +444,9 @@ func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			upsertUserKey(db, user.ID, "dek_wrapped_by_kek", req.NewEncryptedDEK)
 		}
 
+		deviceID := c.GetString("device_id")
 		db.Model(&models.RefreshToken{}).
-			Where("user_id = ? AND revoked_at IS NULL", user.ID).
+			Where("user_id = ? AND device_id <> ? AND revoked_at IS NULL", user.ID, deviceID).
 			Update("revoked_at", time.Now())
 
 		c.Status(http.StatusNoContent)
@@ -493,7 +493,24 @@ func HandleRecovery(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid signature encoding")
 			return
 		}
-		if len(sigBytes) < 1 {
+
+		if user.PublicKey == nil || *user.PublicKey == "" || req.NewNonce == "" {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid signature")
+			return
+		}
+		pubKeyBytes, err := base64.RawStdEncoding.DecodeString(*user.PublicKey)
+		if err != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid signature")
+			return
+		}
+		nonceBytes, err := base64.RawStdEncoding.DecodeString(req.NewNonce)
+		if err != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid signature")
+			return
+		}
+		mac := hmac.New(sha256.New, pubKeyBytes)
+		mac.Write(nonceBytes)
+		if !ConstantTimeCompare(sigBytes, mac.Sum(nil)) {
 			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid signature")
 			return
 		}
@@ -703,14 +720,4 @@ func randHex(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return base64.RawStdEncoding.EncodeToString(b)
-}
-
-func randInt(min, max int) int {
-	b := make([]byte, 4)
-	rand.Read(b)
-	v := int(b[0])<<24 | int(b[1])<<16 | int(b[2])<<8 | int(b[3])
-	if v < 0 {
-		v = -v
-	}
-	return min + (v % (max - min + 1))
 }

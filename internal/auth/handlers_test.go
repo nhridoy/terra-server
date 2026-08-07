@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -91,6 +92,40 @@ func makeAccessToken(userID uuid.UUID, cfg *config.Config) string {
 		panic("makeAccessToken: " + err.Error())
 	}
 	return at
+}
+
+func makeAccessTokenForDevice(userID uuid.UUID, deviceID string, cfg *config.Config) string {
+	at, _, err := GenerateTokenPair(userID, deviceID, cfg)
+	if err != nil {
+		panic("makeAccessTokenForDevice: " + err.Error())
+	}
+	return at
+}
+
+const testPublicKey = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHw"
+
+func seedRecoveryCode(db *gorm.DB, userID uuid.UUID, recoveryCode string) {
+	codeHash := sha256.Sum256([]byte(recoveryCode))
+	codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
+	db.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"recovery_hash": codeHashB64,
+		"public_key":    testPublicKey,
+	})
+}
+
+func recoverySignature(t *testing.T, nonceB64 string) string {
+	t.Helper()
+	pubKey, err := base64.RawStdEncoding.DecodeString(testPublicKey)
+	if err != nil {
+		t.Fatalf("pubkey decode: %v", err)
+	}
+	nonceBytes, err := base64.RawStdEncoding.DecodeString(nonceB64)
+	if err != nil {
+		t.Fatalf("nonce decode: %v", err)
+	}
+	mac := hmac.New(sha256.New, pubKey)
+	mac.Write(nonceBytes)
+	return base64.RawStdEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func TestPrelogin_KnownEmail(t *testing.T) {
@@ -959,7 +994,7 @@ func TestPasswordChange_RevokesOtherSessions(t *testing.T) {
 	rt1, _ := createRefreshToken(db, uid, "device-1", cfg)
 	rt2, _ := createRefreshToken(db, uid, "device-2", cfg)
 
-	token := makeAccessToken(uid, cfg)
+	token := makeAccessTokenForDevice(uid, "device-1", cfg)
 	nonce := []byte("revoke-nonce")
 	proof := GenerateProof(verifier, nonce)
 
@@ -980,17 +1015,20 @@ func TestPasswordChange_RevokesOtherSessions(t *testing.T) {
 
 	var revokedCount int64
 	db.Model(&models.RefreshToken{}).Where("user_id = ? AND revoked_at IS NOT NULL", uid).Count(&revokedCount)
-	if revokedCount < 2 {
-		t.Errorf("expected at least 2 revoked tokens after password change, got %d", revokedCount)
+	if revokedCount != 1 {
+		t.Errorf("expected exactly 1 revoked token (other device) after password change, got %d", revokedCount)
 	}
 
-	for _, rtRaw := range []string{rt1, rt2} {
-		h := hashToken(rtRaw)
-		var rt models.RefreshToken
-		db.Where("token_hash = ?", h).First(&rt)
-		if rt.RevokedAt == nil {
-			t.Errorf("token %s should be revoked", rtRaw[:8])
-		}
+	var rt1Row models.RefreshToken
+	db.Where("token_hash = ?", hashToken(rt1)).First(&rt1Row)
+	if rt1Row.RevokedAt != nil {
+		t.Errorf("current device token should NOT be revoked after password change")
+	}
+
+	var rt2Row models.RefreshToken
+	db.Where("token_hash = ?", hashToken(rt2)).First(&rt2Row)
+	if rt2Row.RevokedAt == nil {
+		t.Errorf("other device token should be revoked after password change")
 	}
 }
 
@@ -1021,20 +1059,20 @@ func TestRecovery_ValidSignature(t *testing.T) {
 
 	uid, _ := seedUserWithVerifier(t, db, "recovery@example.com")
 	recoveryCode := "my-secret-recovery-code"
-	codeHash := sha256.Sum256([]byte(recoveryCode))
-	codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
-	db.Model(&models.User{}).Where("id = ?", uid).Update("recovery_hash", codeHashB64)
+	seedRecoveryCode(db, uid, recoveryCode)
 
+	nonce := base64.RawStdEncoding.EncodeToString([]byte("challenge-nonce"))
 	newCode := "brand-new-recovery-code"
 	body, _ := json.Marshal(gin.H{
 		"recovery_code":               base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
-		"signature":                   base64.RawStdEncoding.EncodeToString([]byte("valid-sig")),
+		"signature":                   recoverySignature(t, nonce),
 		"new_recovery_code":           base64.RawStdEncoding.EncodeToString([]byte(newCode)),
 		"new_verifier":                "recovered-verifier",
 		"new_encrypted_dek":           "new-dek-wrap",
 		"new_dek_wrapped_by_recovery": "new-recovery-wrap",
 		"new_server_salt":             "recovered-salt",
 		"new_salt_cl":                 "recovered-salt-cl",
+		"new_nonce":                   nonce,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1071,14 +1109,14 @@ func TestRecovery_NoNewCodeConsumesOld(t *testing.T) {
 
 	uid, _ := seedUserWithVerifier(t, db, "recovery-consume@example.com")
 	recoveryCode := "consume-me-code"
-	codeHash := sha256.Sum256([]byte(recoveryCode))
-	codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
-	db.Model(&models.User{}).Where("id = ?", uid).Update("recovery_hash", codeHashB64)
+	seedRecoveryCode(db, uid, recoveryCode)
 
+	nonce := base64.RawStdEncoding.EncodeToString([]byte("consume-nonce"))
 	body, _ := json.Marshal(gin.H{
 		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
-		"signature":     base64.RawStdEncoding.EncodeToString([]byte("valid-sig")),
+		"signature":     recoverySignature(t, nonce),
 		"new_verifier":  "recovered-verifier",
+		"new_nonce":     nonce,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1108,15 +1146,15 @@ func TestRecovery_InvalidCode(t *testing.T) {
 
 	uid, _ := seedUserWithVerifier(t, db, "recovery-invalid@example.com")
 	realCode := "real-recovery-code"
-	codeHash := sha256.Sum256([]byte(realCode))
-	codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
-	db.Model(&models.User{}).Where("id = ?", uid).Update("recovery_hash", codeHashB64)
+	seedRecoveryCode(db, uid, realCode)
 
+	nonce := base64.RawStdEncoding.EncodeToString([]byte("invalid-code-nonce"))
 	wrongCode := base64.RawStdEncoding.EncodeToString([]byte("wrong-recovery-code"))
 	body, _ := json.Marshal(gin.H{
 		"recovery_code": wrongCode,
-		"signature":     base64.RawStdEncoding.EncodeToString([]byte("some-sig")),
+		"signature":     recoverySignature(t, nonce),
 		"new_verifier":  "new-v",
+		"new_nonce":     nonce,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1135,22 +1173,22 @@ func TestRecovery_InvalidSignature(t *testing.T) {
 
 	uid, _ := seedUserWithVerifier(t, db, "recovery-sig@example.com")
 	recoveryCode := "valid-code"
-	codeHash := sha256.Sum256([]byte(recoveryCode))
-	codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
-	db.Model(&models.User{}).Where("id = ?", uid).Update("recovery_hash", codeHashB64)
+	seedRecoveryCode(db, uid, recoveryCode)
 
+	nonce := base64.RawStdEncoding.EncodeToString([]byte("bad-sig-nonce"))
 	body, _ := json.Marshal(gin.H{
 		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
 		"signature":     base64.RawStdEncoding.EncodeToString([]byte("x")),
 		"new_verifier":  "new-v",
+		"new_nonce":     nonce,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -1161,9 +1199,7 @@ func TestRecovery_ReplacesKeyring(t *testing.T) {
 
 	uid, _ := seedUserWithVerifier(t, db, "recovery-keyring@example.com")
 	recoveryCode := "keyring-recovery"
-	codeHash := sha256.Sum256([]byte(recoveryCode))
-	codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
-	db.Model(&models.User{}).Where("id = ?", uid).Update("recovery_hash", codeHashB64)
+	seedRecoveryCode(db, uid, recoveryCode)
 
 	db.Create(&models.UserKey{
 		UserID:  uid,
@@ -1171,11 +1207,13 @@ func TestRecovery_ReplacesKeyring(t *testing.T) {
 		Payload: "old-dek-payload",
 	})
 
+	nonce := base64.RawStdEncoding.EncodeToString([]byte("keyring-nonce"))
 	body, _ := json.Marshal(gin.H{
-		"recovery_code":     base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
-		"signature":         base64.RawStdEncoding.EncodeToString([]byte("sig")),
-		"new_verifier":      "recovered-v",
+		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
+		"signature":     recoverySignature(t, nonce),
+		"new_verifier":  "recovered-v",
 		"new_encrypted_dek": "new-dek-payload",
+		"new_nonce":     nonce,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1202,17 +1240,17 @@ func TestRecovery_RevokesAllSessions(t *testing.T) {
 
 	uid, _ := seedUserWithVerifier(t, db, "recovery-revoke@example.com")
 	recoveryCode := "revoke-all-code"
-	codeHash := sha256.Sum256([]byte(recoveryCode))
-	codeHashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
-	db.Model(&models.User{}).Where("id = ?", uid).Update("recovery_hash", codeHashB64)
+	seedRecoveryCode(db, uid, recoveryCode)
 
 	createRefreshToken(db, uid, "device-1", cfg)
 	createRefreshToken(db, uid, "device-2", cfg)
 
+	nonce := base64.RawStdEncoding.EncodeToString([]byte("revoke-nonce"))
 	body, _ := json.Marshal(gin.H{
 		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
-		"signature":     base64.RawStdEncoding.EncodeToString([]byte("sig")),
+		"signature":     recoverySignature(t, nonce),
 		"new_verifier":  "recovered-v",
+		"new_nonce":     nonce,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
