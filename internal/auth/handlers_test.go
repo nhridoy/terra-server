@@ -46,6 +46,7 @@ func setupHandlerRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	protected := r.Group("/api/v1")
 	protected.Use(JWTMiddleware(cfg))
 	protected.GET("/me", HandleMe(db))
+	protected.GET("/auth/keyring", HandleKeyring(db))
 	protected.POST("/auth/password-change", HandlePasswordChange(db, cfg))
 	return r
 }
@@ -793,6 +794,63 @@ func TestMe_NoToken(t *testing.T) {
 	r := setupHandlerRouter(db, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestKeyring_ValidToken(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, _ := seedUserWithVerifier(t, db, "keyring@example.com")
+	db.Create(&models.UserKey{UserID: uid, KeyType: "dek_wrapped_by_kek", Payload: "wrapped-kek"})
+	db.Create(&models.UserKey{UserID: uid, KeyType: "dek_wrapped_by_recovery", Payload: "wrapped-recovery"})
+	db.Create(&models.UserKey{UserID: uid, KeyType: "private_key_wrapped_by_dek", Payload: "wrapped-priv"})
+	token := makeAccessToken(uid, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/keyring", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	data := resp["data"].(map[string]interface{})
+	if data["salt_cl"] != "test-salt-cl" {
+		t.Errorf("salt_cl: want test-salt-cl, got %v", data["salt_cl"])
+	}
+	keyring, ok := data["keyring"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected keyring object, got %v", data["keyring"])
+	}
+	if keyring["dek_wrapped_by_kek"] != "wrapped-kek" {
+		t.Errorf("dek_wrapped_by_kek: want wrapped-kek, got %v", keyring["dek_wrapped_by_kek"])
+	}
+	if keyring["dek_wrapped_by_recovery"] != "wrapped-recovery" {
+		t.Errorf("dek_wrapped_by_recovery: want wrapped-recovery, got %v", keyring["dek_wrapped_by_recovery"])
+	}
+	if keyring["private_key_wrapped_by_dek"] != "wrapped-priv" {
+		t.Errorf("private_key_wrapped_by_dek: want wrapped-priv, got %v", keyring["private_key_wrapped_by_dek"])
+	}
+}
+
+func TestKeyring_NoToken(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/keyring", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

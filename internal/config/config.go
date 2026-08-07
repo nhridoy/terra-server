@@ -22,6 +22,7 @@ type Config struct {
 	OAuthGitHubID     string
 	OAuthGitHubSecret string
 	OAuthRedirectBase string
+	OAuthRedirectURIs []string
 	AppScheme         string
 	RateLimitAuth     int
 	RateLimitAPI      int
@@ -68,6 +69,21 @@ func Load() *Config {
 			cidr = strings.TrimSpace(cidr)
 			if cidr != "" {
 				cfg.TrustedProxies = append(cfg.TrustedProxies, cidr)
+			}
+		}
+	}
+
+	cfg.OAuthRedirectURIs = []string{
+		"http://127.0.0.1:1421/oauth/callback",
+		"http://127.0.0.1:1422/oauth/callback",
+		"http://127.0.0.1:1423/oauth/callback",
+	}
+	if v := os.Getenv("TERMVAULT_OAUTH_REDIRECT_URIS"); v != "" {
+		cfg.OAuthRedirectURIs = nil
+		for _, uri := range strings.Split(v, ",") {
+			uri = strings.TrimSpace(uri)
+			if uri != "" {
+				cfg.OAuthRedirectURIs = append(cfg.OAuthRedirectURIs, uri)
 			}
 		}
 	}

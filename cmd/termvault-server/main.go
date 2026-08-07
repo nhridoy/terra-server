@@ -60,6 +60,7 @@ func main() {
 	protected := r.Group("/api/v1")
 	protected.Use(auth.JWTMiddleware(cfg))
 	protected.GET("/me", auth.HandleMe(db))
+	protected.GET("/auth/keyring", auth.HandleKeyring(db))
 	protected.POST("/auth/password-change", auth.HandlePasswordChange(db, cfg))
 
 	addr := cfg.Host + ":" + cfg.Port

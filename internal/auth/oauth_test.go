@@ -2,6 +2,8 @@ package auth
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +28,11 @@ func oauthTestConfig() *config.Config {
 		OAuthGitHubSecret: "github-client-secret",
 		OAuthRedirectBase: "http://localhost:8080",
 		AppScheme:         "termvault",
+		OAuthRedirectURIs: []string{
+			"http://127.0.0.1:1421/oauth/callback",
+			"http://127.0.0.1:1422/oauth/callback",
+			"http://127.0.0.1:1423/oauth/callback",
+		},
 	}
 }
 
@@ -42,13 +49,14 @@ func oauthRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	return r
 }
 
-func seedOAuthState(t *testing.T, db *gorm.DB, state, provider, codeVerifier, deviceID string, expiresAt time.Time, usedAt *time.Time) {
+func seedOAuthState(t *testing.T, db *gorm.DB, state, provider, codeVerifier, deviceID string, expiresAt time.Time, usedAt *time.Time, redirectURI string) {
 	t.Helper()
 	os := models.OAuthState{
 		State:        state,
 		Provider:     provider,
 		CodeVerifier: codeVerifier,
 		DeviceID:     deviceID,
+		RedirectURI:  redirectURI,
 		ExpiresAt:    expiresAt,
 		UsedAt:       usedAt,
 	}
@@ -177,6 +185,83 @@ func TestOAuthStart_StoresDeviceID(t *testing.T) {
 	}
 }
 
+func TestOAuthStart_RejectsUnregisteredAppCallback(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := oauthTestConfig()
+	r := oauthRouter(db, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/start/google?app_callback=http://evil.example/cb", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestOAuthStart_JSONFormatWithAppCallback(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := oauthTestConfig()
+	r := oauthRouter(db, cfg)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/auth/oauth/start/google?device_id=dev-1&format=json&app_callback=http://127.0.0.1:1421/oauth/callback",
+		nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	data := resp["data"].(map[string]interface{})
+	authURL, ok := data["auth_url"].(string)
+	if !ok || !contains(authURL, "accounts.google.com") {
+		t.Errorf("expected auth_url for Google, got: %v", data["auth_url"])
+	}
+
+	var os models.OAuthState
+	db.Where("provider = ?", "google").First(&os)
+	if os.RedirectURI != "http://127.0.0.1:1421/oauth/callback" {
+		t.Errorf("expected RedirectURI stored, got %q", os.RedirectURI)
+	}
+}
+
+func TestOAuthCallback_RedirectsToStoredAppCallback(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := oauthTestConfig()
+	r := oauthRouter(db, cfg)
+
+	usedAt := time.Now()
+	seedOAuthState(t, db, "cb-state", "google", "verifier", "dev1", time.Now().Add(10*time.Minute), &usedAt, "http://127.0.0.1:1421/oauth/callback")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/callback/google?code=abc&state=cb-state", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+
+	location := w.Header().Get("Location")
+	if !contains(location, "http://127.0.0.1:1421/oauth/callback") {
+		t.Errorf("expected redirect to stored app callback, got: %s", location)
+	}
+	if !contains(location, "dest=error") {
+		t.Errorf("expected dest=error, got: %s", location)
+	}
+	if !contains(location, "state_already_used") {
+		t.Errorf("expected state_already_used, got: %s", location)
+	}
+	if contains(location, "termvault://") {
+		t.Errorf("expected loopback redirect, not app scheme, got: %s", location)
+	}
+}
+
 func TestOAuthCallback_InvalidState(t *testing.T) {
 	db := setupTestDB(t)
 	cfg := oauthTestConfig()
@@ -205,7 +290,7 @@ func TestOAuthCallback_UsedState(t *testing.T) {
 	r := oauthRouter(db, cfg)
 
 	usedAt := time.Now()
-	seedOAuthState(t, db, "used-state", "google", "verifier", "dev1", time.Now().Add(10*time.Minute), &usedAt)
+	seedOAuthState(t, db, "used-state", "google", "verifier", "dev1", time.Now().Add(10*time.Minute), &usedAt, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/callback/google?code=abc&state=used-state", nil)
 	w := httptest.NewRecorder()
@@ -226,7 +311,7 @@ func TestOAuthCallback_ExpiredState(t *testing.T) {
 	cfg := oauthTestConfig()
 	r := oauthRouter(db, cfg)
 
-	seedOAuthState(t, db, "expired-state", "google", "verifier", "dev1", time.Now().Add(-1*time.Hour), nil)
+	seedOAuthState(t, db, "expired-state", "google", "verifier", "dev1", time.Now().Add(-1*time.Hour), nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/callback/google?code=abc&state=expired-state", nil)
 	w := httptest.NewRecorder()
@@ -397,11 +482,24 @@ func TestOAuthSetup_ValidSetupToken(t *testing.T) {
 	uid := seedOAuthUser(t, db, "google", "12345", "setup@example.com", false)
 	seedAuthCode(t, db, "valid-setup-token", "oauth_setup", uid, "dev1", time.Now().Add(15*time.Minute), nil)
 
+	recoveryCode := "recovery-code-123"
 	body, _ := json.Marshal(gin.H{
-		"setup_token":       "valid-setup-token",
-		"encrypted_dek":     "base64-dek",
-		"encrypted_privkey": "base64-privkey",
-		"auth_verifier":     "new-verifier",
+		"setup_token":   "valid-setup-token",
+		"auth_verifier": "new-verifier",
+		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
+		"public_key":    "base64-public-key",
+		"keyring": gin.H{
+			"dek_wrapped_by_kek":         "dek-a",
+			"dek_wrapped_by_recovery":    "dek-b",
+			"private_key_wrapped_by_dek": "priv-c",
+		},
+		"kdf": gin.H{
+			"m": 65536,
+			"t": 3,
+			"p": 2,
+		},
+		"server_salt": "server-salt",
+		"salt_cl":     "client-salt",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/setup", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -433,19 +531,41 @@ func TestOAuthSetup_ValidSetupToken(t *testing.T) {
 	if user.AuthVerifier == nil || *user.AuthVerifier != "new-verifier" {
 		t.Error("auth_verifier should be set")
 	}
-
-	var dek models.UserKey
-	if db.Where("user_id = ? AND key_type = ?", uid, "dek").First(&dek).Error != nil {
-		t.Error("DEK key should be created")
-	} else if dek.Payload != "base64-dek" {
-		t.Errorf("DEK payload: want base64-dek, got %s", dek.Payload)
+	if user.AuthSalt == nil || *user.AuthSalt != "server-salt" {
+		t.Errorf("server_salt: want server-salt, got %v", user.AuthSalt)
+	}
+	if user.SaltCL == nil || *user.SaltCL != "client-salt" {
+		t.Errorf("salt_cl: want client-salt, got %v", user.SaltCL)
+	}
+	if user.KDFM != 65536 || user.KDFT != 3 || user.KDFP != 2 {
+		t.Errorf("kdf not stored: %d/%d/%d", user.KDFM, user.KDFT, user.KDFP)
+	}
+	if user.PublicKey == nil || *user.PublicKey != "base64-public-key" {
+		t.Errorf("public_key not stored: %v", user.PublicKey)
+	}
+	expectedCodeHash := sha256.Sum256([]byte(recoveryCode))
+	expectedB64 := base64.RawStdEncoding.EncodeToString(expectedCodeHash[:])
+	if user.RecoveryHash == nil || *user.RecoveryHash != expectedB64 {
+		t.Errorf("recovery_hash: want %q, got %v", expectedB64, user.RecoveryHash)
 	}
 
-	var pk models.UserKey
-	if db.Where("user_id = ? AND key_type = ?", uid, "privkey").First(&pk).Error != nil {
-		t.Error("privkey should be created")
-	} else if pk.Payload != "base64-privkey" {
-		t.Errorf("privkey payload: want base64-privkey, got %s", pk.Payload)
+	rows := map[string]string{}
+	var uks []models.UserKey
+	db.Where("user_id = ?", uid).Find(&uks)
+	for _, uk := range uks {
+		rows[uk.KeyType] = uk.Payload
+	}
+	if rows["dek_wrapped_by_kek"] != "dek-a" {
+		t.Errorf("dek_wrapped_by_kek: want dek-a, got %q", rows["dek_wrapped_by_kek"])
+	}
+	if rows["dek_wrapped_by_recovery"] != "dek-b" {
+		t.Errorf("dek_wrapped_by_recovery: want dek-b, got %q", rows["dek_wrapped_by_recovery"])
+	}
+	if rows["private_key_wrapped_by_dek"] != "priv-c" {
+		t.Errorf("private_key_wrapped_by_dek: want priv-c, got %q", rows["private_key_wrapped_by_dek"])
+	}
+	if len(uks) != 3 {
+		t.Errorf("expected 3 keyring rows, got %d", len(uks))
 	}
 }
 
@@ -459,8 +579,9 @@ func TestOAuthSetup_ExpiredToken(t *testing.T) {
 
 	body, _ := json.Marshal(gin.H{
 		"setup_token":   "expired-setup-token",
-		"encrypted_dek": "base64-dek",
 		"auth_verifier": "new-verifier",
+		"server_salt":   "server-salt",
+		"salt_cl":       "client-salt",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/setup", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -482,8 +603,9 @@ func TestOAuthSetup_AlreadyInitialized(t *testing.T) {
 
 	body, _ := json.Marshal(gin.H{
 		"setup_token":   "init-setup-token",
-		"encrypted_dek": "base64-dek",
 		"auth_verifier": "new-verifier",
+		"server_salt":   "server-salt",
+		"salt_cl":       "client-salt",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/setup", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -506,8 +628,9 @@ func TestOAuthSetup_UsedToken(t *testing.T) {
 
 	body, _ := json.Marshal(gin.H{
 		"setup_token":   "used-setup-token",
-		"encrypted_dek": "base64-dek",
 		"auth_verifier": "new-verifier",
+		"server_salt":   "server-salt",
+		"salt_cl":       "client-salt",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/setup", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -519,18 +642,19 @@ func TestOAuthSetup_UsedToken(t *testing.T) {
 	}
 }
 
-func TestOAuthSetup_NoPrivkey(t *testing.T) {
+func TestOAuthSetup_WithoutKeyring(t *testing.T) {
 	db := setupTestDB(t)
 	cfg := oauthTestConfig()
 	r := oauthRouter(db, cfg)
 
-	uid := seedOAuthUser(t, db, "google", "12345", "no-privkey-setup@example.com", false)
-	seedAuthCode(t, db, "no-privkey-token", "oauth_setup", uid, "dev1", time.Now().Add(15*time.Minute), nil)
+	uid := seedOAuthUser(t, db, "google", "12345", "no-keyring-setup@example.com", false)
+	seedAuthCode(t, db, "no-keyring-token", "oauth_setup", uid, "dev1", time.Now().Add(15*time.Minute), nil)
 
 	body, _ := json.Marshal(gin.H{
-		"setup_token":   "no-privkey-token",
-		"encrypted_dek": "base64-dek",
+		"setup_token":   "no-keyring-token",
 		"auth_verifier": "new-verifier",
+		"server_salt":   "server-salt",
+		"salt_cl":       "client-salt",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/setup", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -542,9 +666,9 @@ func TestOAuthSetup_NoPrivkey(t *testing.T) {
 	}
 
 	var count int64
-	db.Model(&models.UserKey{}).Where("user_id = ? AND key_type = ?", uid, "privkey").Count(&count)
+	db.Model(&models.UserKey{}).Where("user_id = ?", uid).Count(&count)
 	if count != 0 {
-		t.Error("no privkey should be created when not provided")
+		t.Errorf("expected no keyring rows when not provided, got %d", count)
 	}
 }
 
@@ -555,8 +679,9 @@ func TestOAuthSetup_InvalidToken(t *testing.T) {
 
 	body, _ := json.Marshal(gin.H{
 		"setup_token":   "nonexistent-token",
-		"encrypted_dek": "base64-dek",
 		"auth_verifier": "new-verifier",
+		"server_salt":   "server-salt",
+		"salt_cl":       "client-salt",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/setup", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
