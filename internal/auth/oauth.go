@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -223,6 +224,56 @@ func fetchGitHubUserInfo(token *oauth2.Token, apiBase string) (*userInfo, error)
 	}, nil
 }
 
+var (
+	errOAuthLinkFailed       = errors.New("oauth link failed")
+	errOAuthUserCreateFailed = errors.New("oauth user create failed")
+	errOAuthVaultSeedFailed  = errors.New("oauth vault seed failed")
+)
+
+// linkOrCreateOAuthUser links an existing account to an OAuth provider or
+// creates a new user when no matching account exists, and returns it. OAuth
+// users are exempt from email verification: the provider has already
+// confirmed the address, so EmailVerifiedAt is set on both paths. The
+// returned error distinguishes the failure stage so the handler can pick the
+// right redirect reason.
+func linkOrCreateOAuthUser(db *gorm.DB, provider string, ui *userInfo) (models.User, error) {
+	providerSub := ui.ProviderSub
+	var user models.User
+	found := db.Where("auth_provider = ? AND provider_sub = ?", provider, providerSub).First(&user).Error == nil
+
+	if !found {
+		if db.Where("email = ?", ui.Email).First(&user).Error == nil {
+			user.AuthProvider = provider
+			user.ProviderSub = &providerSub
+			now := time.Now()
+			user.EmailVerifiedAt = &now
+			if err := db.Save(&user).Error; err != nil {
+				return user, errOAuthLinkFailed
+			}
+		} else {
+			now := time.Now()
+			user = models.User{
+				ID:              uuid.New(),
+				Email:           ui.Email,
+				FullName:        ui.Name,
+				AuthProvider:    provider,
+				ProviderSub:     &providerSub,
+				EmailVerifiedAt: &now,
+				Initialized:     false,
+				CreatedAt:       now,
+				UpdatedAt:       now,
+			}
+			if err := db.Create(&user).Error; err != nil {
+				return user, errOAuthUserCreateFailed
+			}
+			if err := models.SeedPersonalVault(db, user.ID); err != nil {
+				return user, errOAuthVaultSeedFailed
+			}
+		}
+	}
+	return user, nil
+}
+
 func HandleOAuthStart(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		provider := c.Param("provider")
@@ -336,38 +387,17 @@ func HandleOAuthCallback(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		var user models.User
-		providerSub := ui.ProviderSub
-		found := db.Where("auth_provider = ? AND provider_sub = ?", provider, providerSub).First(&user).Error == nil
-
-		if !found {
-			if db.Where("email = ?", ui.Email).First(&user).Error == nil {
-				user.AuthProvider = provider
-				user.ProviderSub = &providerSub
-				if err := db.Save(&user).Error; err != nil {
-					c.Redirect(http.StatusFound, oauthTargetURL(&oauthState, cfg, "error", url.Values{"message": []string{"link_failed"}}))
-					return
-				}
-			} else {
-				user = models.User{
-					ID:           uuid.New(),
-					Email:        ui.Email,
-					FullName:     ui.Name,
-					AuthProvider: provider,
-					ProviderSub:  &providerSub,
-					Initialized:  false,
-					CreatedAt:    time.Now(),
-					UpdatedAt:    time.Now(),
-				}
-				if err := db.Create(&user).Error; err != nil {
-					c.Redirect(http.StatusFound, oauthTargetURL(&oauthState, cfg, "error", url.Values{"message": []string{"create_user_failed"}}))
-					return
-				}
-				if err := models.SeedPersonalVault(db, user.ID); err != nil {
-					c.Redirect(http.StatusFound, oauthTargetURL(&oauthState, cfg, "error", url.Values{"message": []string{"vault_seed_failed"}}))
-					return
-				}
+		user, err := linkOrCreateOAuthUser(db, provider, ui)
+		if err != nil {
+			message := "link_failed"
+			switch {
+			case errors.Is(err, errOAuthUserCreateFailed):
+				message = "create_user_failed"
+			case errors.Is(err, errOAuthVaultSeedFailed):
+				message = "vault_seed_failed"
 			}
+			c.Redirect(http.StatusFound, oauthTargetURL(&oauthState, cfg, "error", url.Values{"message": []string{message}}))
+			return
 		}
 
 		if !user.Initialized {
@@ -484,10 +514,10 @@ func HandleOAuthExchange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 }
 
 type oauthSetupRequest struct {
-	SetupToken  string         `json:"setup_token" binding:"required"`
-	AuthVerifier string        `json:"auth_verifier" binding:"required"`
-	RecoveryCode string        `json:"recovery_code"`
-	PublicKey    string        `json:"public_key"`
+	SetupToken   string         `json:"setup_token" binding:"required"`
+	AuthVerifier string         `json:"auth_verifier" binding:"required"`
+	RecoveryCode string         `json:"recovery_code"`
+	PublicKey    string         `json:"public_key"`
 	Keyring      keyringPayload `json:"keyring"`
 	KDF          kdfParams      `json:"kdf"`
 	ServerSalt   string         `json:"server_salt" binding:"required"`
@@ -610,7 +640,7 @@ func HandleKeyring(db *gorm.DB) gin.HandlerFunc {
 		keyring := fetchKeyring(db, user.ID)
 		Success(c, http.StatusOK, gin.H{
 			"keyring": keyring,
-			"salt_cl":  deref(user.SaltCL),
+			"salt_cl": deref(user.SaltCL),
 		})
 	}
 }

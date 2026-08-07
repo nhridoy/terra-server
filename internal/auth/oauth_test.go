@@ -19,15 +19,15 @@ import (
 
 func oauthTestConfig() *config.Config {
 	return &config.Config{
-		JWTSecret:         "test-secret-key",
-		JWTExpiry:         15 * 60e9,
+		JWTSecret:          "test-secret-key",
+		JWTExpiry:          15 * 60e9,
 		RefreshTokenExpiry: 30 * 24 * 60e9,
-		OAuthGoogleID:     "google-client-id",
-		OAuthGoogleSecret: "google-client-secret",
-		OAuthGitHubID:     "github-client-id",
-		OAuthGitHubSecret: "github-client-secret",
-		OAuthRedirectBase: "http://localhost:8080",
-		AppScheme:         "termvault",
+		OAuthGoogleID:      "google-client-id",
+		OAuthGoogleSecret:  "google-client-secret",
+		OAuthGitHubID:      "github-client-id",
+		OAuthGitHubSecret:  "github-client-secret",
+		OAuthRedirectBase:  "http://localhost:8080",
+		AppScheme:          "termvault",
 		OAuthRedirectURIs: []string{
 			"http://127.0.0.1:1421/oauth/callback",
 			"http://127.0.0.1:1422/oauth/callback",
@@ -362,6 +362,60 @@ func TestOAuthCallback_MissingState(t *testing.T) {
 	location := w.Header().Get("Location")
 	if !contains(location, "missing_code_or_state") {
 		t.Errorf("expected missing_code_or_state, got: %s", location)
+	}
+}
+
+func TestOAuthCallback_CreatesVerifiedUser(t *testing.T) {
+	db := setupTestDB(t)
+
+	ui := &userInfo{Email: "new-oauth@example.com", Name: "New OAuth User", ProviderSub: "new-sub-1"}
+	user, err := linkOrCreateOAuthUser(db, "google", ui)
+	if err != nil {
+		t.Fatalf("linkOrCreateOAuthUser: %v", err)
+	}
+	if user.EmailVerifiedAt == nil {
+		t.Error("new OAuth user should be email-verified at creation")
+	}
+
+	var persisted models.User
+	if err := db.Where("id = ?", user.ID).First(&persisted).Error; err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if persisted.EmailVerifiedAt == nil {
+		t.Error("created user row should have email_verified_at set")
+	}
+}
+
+func TestOAuthCallback_LinksExistingEmailVerified(t *testing.T) {
+	db := setupTestDB(t)
+
+	existing := models.User{
+		ID:       uuid.New(),
+		Email:    "existing-oauth@example.com",
+		FullName: "Existing User",
+	}
+	if err := db.Create(&existing).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	ui := &userInfo{Email: "existing-oauth@example.com", Name: "Existing User", ProviderSub: "link-sub-1"}
+	user, err := linkOrCreateOAuthUser(db, "google", ui)
+	if err != nil {
+		t.Fatalf("linkOrCreateOAuthUser: %v", err)
+	}
+	if user.ID != existing.ID {
+		t.Errorf("expected linked user id %s, got %s", existing.ID, user.ID)
+	}
+	if user.EmailVerifiedAt == nil {
+		t.Error("email-linked OAuth user should be email-verified at link time")
+	}
+
+	var persisted models.User
+	if err := db.Where("id = ?", user.ID).First(&persisted).Error; err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if persisted.EmailVerifiedAt == nil {
+		t.Error("linked user row should have email_verified_at set")
 	}
 }
 
