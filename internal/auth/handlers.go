@@ -46,6 +46,12 @@ type registerRequest struct {
 	SaltCL       string         `json:"salt_cl" binding:"required"`
 }
 
+type verifyEmailRequest struct {
+	Email    string `json:"email" binding:"required"`
+	Otp      string `json:"otp" binding:"required"`
+	DeviceID string `json:"device_id"`
+}
+
 func HandlePrelogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req preloginRequest
@@ -733,6 +739,79 @@ func createRefreshToken(db *gorm.DB, userID uuid.UUID, deviceID string, cfg *con
 		return "", err
 	}
 	return rawToken, nil
+}
+
+func HandleVerifyEmail(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req verifyEmailRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "email and otp are required")
+			return
+		}
+
+		var user models.User
+		if db.Where("email = ?", req.Email).First(&user).Error != nil {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid email")
+			return
+		}
+		if user.EmailVerifiedAt != nil {
+			Error(c, http.StatusBadRequest, "ALREADY_VERIFIED", "email already verified")
+			return
+		}
+
+		code, err := findEmailVerifyCode(db, user.ID)
+		if err != nil || code.ExpiresAt.Before(time.Now()) {
+			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "verification code expired or missing")
+			return
+		}
+
+		hash := sha256.Sum256([]byte(req.Otp))
+		hashB64 := base64.RawStdEncoding.EncodeToString(hash[:])
+		if !ConstantTimeCompare([]byte(hashB64), []byte(code.CodeHash)) {
+			code.Attempts++
+			if code.Attempts >= maxOtpAttempts {
+				db.Delete(&code)
+				Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "too many failed attempts, request a new code")
+				return
+			}
+			db.Save(&code)
+			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "invalid verification code")
+			return
+		}
+
+		now := time.Now()
+		if err := db.Model(&user).Updates(map[string]interface{}{
+			"email_verified_at": &now,
+			"last_login_at":     &now,
+		}).Error; err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to verify email")
+			return
+		}
+		user.EmailVerifiedAt = &now
+
+		if err := db.Delete(&code).Error; err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to consume verification code")
+			return
+		}
+
+		rt, err := createRefreshToken(db, user.ID, req.DeviceID, cfg)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create refresh token")
+			return
+		}
+		at, _, err := GenerateTokenPair(user.ID, req.DeviceID, cfg)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
+			return
+		}
+
+		Success(c, http.StatusOK, gin.H{
+			"access_token":  at,
+			"refresh_token": rt,
+			"user":          user,
+			"keyring":       fetchKeyring(db, user.ID),
+		})
+	}
 }
 
 func hashToken(token string) string {

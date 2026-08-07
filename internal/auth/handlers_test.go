@@ -38,6 +38,7 @@ func setupHandlerRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	auth := r.Group("/api/v1/auth")
 	auth.POST("/prelogin", HandlePrelogin(db, cfg))
 	auth.POST("/register", HandleRegister(db, cfg))
+	auth.POST("/verify-email", HandleVerifyEmail(db, cfg))
 	auth.POST("/login", HandleLogin(db, cfg))
 	auth.POST("/refresh", HandleRefresh(db, cfg))
 	auth.POST("/logout", HandleLogout(db))
@@ -107,6 +108,26 @@ func seedUserWithVerifier(t *testing.T, db *gorm.DB, email string) (uuid.UUID, [
 		t.Fatalf("seed user: %v", err)
 	}
 	return userID, verifier
+}
+
+func seedUnverifiedUser(t *testing.T, db *gorm.DB, email string) (uuid.UUID, string) {
+	t.Helper()
+	userID, _ := seedUserWithVerifier(t, db, email)
+	for _, keyType := range []string{"dek_wrapped_by_kek", "dek_wrapped_by_recovery", "private_key_wrapped_by_dek"} {
+		db.Create(&models.UserKey{UserID: userID, KeyType: keyType, Payload: "wrapped-" + keyType})
+	}
+	otp, err := issueEmailVerifyCode(db, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return userID, otp
+}
+
+func makeVerifyEmailRequest(email, otp string) *http.Request {
+	raw, _ := json.Marshal(map[string]string{"email": email, "otp": otp, "device_id": "dev-1"})
+	req := httptest.NewRequest("POST", "/api/v1/auth/verify-email", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	return req
 }
 
 func makeAccessToken(userID uuid.UUID, cfg *config.Config) string {
@@ -558,6 +579,135 @@ func TestRegister_VerificationRequired_Reissue(t *testing.T) {
 	db.Model(&models.AuthCode{}).Where("user_id = ? AND purpose = ?", uid, emailVerifyPurpose).Count(&codeCount)
 	if codeCount != 1 {
 		t.Fatalf("expected exactly 1 verification code after re-register, got %d", codeCount)
+	}
+}
+
+func TestVerifyEmail_Success(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+	userID, otp := seedUnverifiedUser(t, db, "verify-ok@example.com")
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeVerifyEmailRequest("verify-ok@example.com", otp))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			AccessToken  string            `json:"access_token"`
+			RefreshToken string            `json:"refresh_token"`
+			Keyring      map[string]string `json:"keyring"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Data.AccessToken == "" || resp.Data.RefreshToken == "" {
+		t.Fatal("expected tokens after verification")
+	}
+	if resp.Data.Keyring == nil {
+		t.Fatal("expected keyring in verify response")
+	}
+
+	var user models.User
+	db.First(&user, "id = ?", userID)
+	if user.EmailVerifiedAt == nil {
+		t.Fatal("expected user verified")
+	}
+	var codeCount int64
+	db.Model(&models.AuthCode{}).Where("user_id = ? AND purpose = ?", userID, emailVerifyPurpose).Count(&codeCount)
+	if codeCount != 0 {
+		t.Fatalf("expected code row deleted after verification, got %d", codeCount)
+	}
+
+	// refresh token must be usable
+	var rt models.RefreshToken
+	if err := db.Where("user_id = ?", userID).First(&rt).Error; err != nil {
+		t.Fatalf("expected refresh token row: %v", err)
+	}
+}
+
+func TestVerifyEmail_WrongCode_ExhaustsAttempts(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+	userID, otp := seedUnverifiedUser(t, db, "brute@example.com")
+
+	for i := 1; i <= maxOtpAttempts; i++ {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, makeVerifyEmailRequest("brute@example.com", "000000"))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("attempt %d: expected 400, got %d", i, w.Code)
+		}
+		if otp == "000000" {
+			t.Fatal("test otp collided with wrong code")
+		}
+	}
+
+	// after 5 failures the row is gone; next attempt still 400
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeVerifyEmailRequest("brute@example.com", otp))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 after attempts exhausted, got %d", w.Code)
+	}
+	var user models.User
+	db.First(&user, "id = ?", userID)
+	if user.EmailVerifiedAt != nil {
+		t.Fatal("user must not be verified after exhausted attempts")
+	}
+	var codeCount int64
+	db.Model(&models.AuthCode{}).Where("user_id = ? AND purpose = ?", userID, emailVerifyPurpose).Count(&codeCount)
+	if codeCount != 0 {
+		t.Fatalf("expected code row deleted after 5 attempts, got %d", codeCount)
+	}
+}
+
+func TestVerifyEmail_ExpiredCode(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+	userID, otp := seedUnverifiedUser(t, db, "expired@example.com")
+
+	db.Model(&models.AuthCode{}).Where("user_id = ? AND purpose = ?", userID, emailVerifyPurpose).
+		Update("expires_at", time.Now().Add(-time.Hour))
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeVerifyEmailRequest("expired@example.com", otp))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestVerifyEmail_UnknownEmail(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeVerifyEmailRequest("nobody@example.com", "123456"))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestVerifyEmail_AlreadyVerified(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+	userID, _ := seedUnverifiedUser(t, db, "already@example.com")
+	now := time.Now()
+	db.Model(&models.User{}).Where("id = ?", userID).Update("email_verified_at", &now)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeVerifyEmailRequest("already@example.com", "123456"))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error.Code != "ALREADY_VERIFIED" {
+		t.Fatalf("expected ALREADY_VERIFIED, got %s", resp.Error.Code)
 	}
 }
 
