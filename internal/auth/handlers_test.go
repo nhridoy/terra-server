@@ -493,6 +493,7 @@ func TestRegister_VerificationOff_ReturnsTokens(t *testing.T) {
 		Data struct {
 			VerificationRequired bool   `json:"verification_required"`
 			AccessToken          string `json:"access_token"`
+			RefreshToken         string `json:"refresh_token"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -501,8 +502,111 @@ func TestRegister_VerificationOff_ReturnsTokens(t *testing.T) {
 	if resp.Data.AccessToken == "" {
 		t.Fatal("expected access token when verification off")
 	}
+	if resp.Data.RefreshToken == "" {
+		t.Fatal("expected refresh token when verification off")
+	}
 	if resp.Data.VerificationRequired {
 		t.Fatal("expected no verification_required flag")
+	}
+}
+
+func TestRegister_VerificationRequired_Reissue(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+
+	userID := uuid.New().String()
+	body := registerRequestPayload("reissue@example.com", userID)
+	raw, _ := json.Marshal(body)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/auth/register", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("POST", "/api/v1/auth/register", bytes.NewReader(raw))
+	req2.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("expected 201 on re-register, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	var resp struct {
+		Data struct {
+			VerificationRequired bool   `json:"verification_required"`
+			AccessToken          string `json:"access_token"`
+			RefreshToken         string `json:"refresh_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Data.VerificationRequired {
+		t.Fatal("expected verification_required true on re-register")
+	}
+	if resp.Data.AccessToken != "" || resp.Data.RefreshToken != "" {
+		t.Fatal("expected no tokens on re-register")
+	}
+
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var codeCount int64
+	db.Model(&models.AuthCode{}).Where("user_id = ? AND purpose = ?", uid, emailVerifyPurpose).Count(&codeCount)
+	if codeCount != 1 {
+		t.Fatalf("expected exactly 1 verification code after re-register, got %d", codeCount)
+	}
+}
+
+func TestRegister_VerifiedUser_ReturnsTokens(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+
+	userID := uuid.New()
+	now := time.Now()
+	salt := "server-salt"
+	saltCL := "client-salt"
+	existing := models.User{
+		ID:              userID,
+		Email:           "verified@example.com",
+		FullName:        "Verified",
+		AuthProvider:    "password",
+		AuthSalt:        &salt,
+		SaltCL:          &saltCL,
+		EmailVerifiedAt: &now,
+	}
+	if err := db.Create(&existing).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	body := registerRequestPayload("verified@example.com", userID.String())
+	raw, _ := json.Marshal(body)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/auth/register", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			VerificationRequired bool   `json:"verification_required"`
+			AccessToken          string `json:"access_token"`
+			RefreshToken         string `json:"refresh_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Data.AccessToken == "" || resp.Data.RefreshToken == "" {
+		t.Fatal("expected tokens for verified user")
+	}
+	if resp.Data.VerificationRequired {
+		t.Fatal("expected no verification_required flag for verified user")
 	}
 }
 
