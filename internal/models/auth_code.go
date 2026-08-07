@@ -13,6 +13,7 @@ type AuthCode struct {
 	UserID    uuid.UUID  `gorm:"type:uuid;not null;index;constraint:OnDelete:CASCADE" json:"user_id"`
 	DeviceID  string     `gorm:"not null" json:"device_id"`
 	ExpiresAt time.Time  `gorm:"not null;index" json:"expires_at"`
+	Attempts  int        `gorm:"not null;default:0" json:"-"`
 	UsedAt    *time.Time `json:"used_at,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 }

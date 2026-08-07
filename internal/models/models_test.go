@@ -3,8 +3,8 @@ package models
 import (
 	"testing"
 
-	"github.com/google/uuid"
 	gormsqlite "github.com/glebarez/sqlite"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -15,6 +15,19 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("failed to open test db: %v", err)
 	}
 	return db
+}
+
+func TestEmailVerificationColumns(t *testing.T) {
+	db := setupTestDB(t)
+	if err := AutoMigrate(db); err != nil {
+		t.Fatalf("AutoMigrate failed: %v", err)
+	}
+	if !db.Migrator().HasColumn("users", "email_verified_at") {
+		t.Errorf("users.email_verified_at column missing after AutoMigrate")
+	}
+	if !db.Migrator().HasColumn("auth_codes", "attempts") {
+		t.Errorf("auth_codes.attempts column missing after AutoMigrate")
+	}
 }
 
 func TestAutoMigrate(t *testing.T) {
