@@ -273,6 +273,16 @@ func HandleLogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
+		if cfg.RequireEmailVerification && user.EmailVerifiedAt == nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": gin.H{
+				"code":       "VERIFICATION_REQUIRED",
+				"message":    "verify your email",
+				"email":      user.Email,
+				"request_id": c.GetString("request_id"),
+			}})
+			return
+		}
+
 		now := time.Now()
 		db.Model(&user).Update("last_login_at", &now)
 

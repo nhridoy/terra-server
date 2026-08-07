@@ -1470,3 +1470,78 @@ func TestRecovery_RevokesAllSessions(t *testing.T) {
 		t.Errorf("expected 0 active tokens after recovery, got %d", activeCount)
 	}
 }
+
+func TestLogin_Unverified_ReturnsVerificationRequired(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+
+	userID, verifier := seedUserWithVerifier(t, db, "gate@example.com")
+	var user models.User
+	db.First(&user, "id = ?", userID)
+
+	nonce := []byte("nonce-bytes")
+	nonceB64 := base64.RawStdEncoding.EncodeToString(nonce)
+	proof := base64.RawStdEncoding.EncodeToString(GenerateProof(verifier, nonce))
+
+	raw, _ := json.Marshal(map[string]string{
+		"email": "gate@example.com", "proof": proof, "nonce": nonceB64,
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Error struct {
+			Code  string `json:"code"`
+			Email string `json:"email"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error.Code != "VERIFICATION_REQUIRED" {
+		t.Fatalf("expected VERIFICATION_REQUIRED, got %s", resp.Error.Code)
+	}
+	if resp.Error.Email != "gate@example.com" {
+		t.Fatalf("expected email in error payload, got %s", resp.Error.Email)
+	}
+
+	db.First(&user, "id = ?", userID)
+	if user.LastLoginAt != nil {
+		t.Fatal("last_login_at must not be updated for unverified user")
+	}
+	var rtCount int64
+	db.Model(&models.RefreshToken{}).Where("user_id = ?", userID).Count(&rtCount)
+	if rtCount != 0 {
+		t.Fatalf("no refresh token should be created, got %d", rtCount)
+	}
+}
+
+func TestLogin_Verified_Succeeds(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+
+	userID, verifier := seedUserWithVerifier(t, db, "ok@example.com")
+	now := time.Now()
+	db.Model(&models.User{}).Where("id = ?", userID).Update("email_verified_at", &now)
+
+	nonce := []byte("nonce-bytes")
+	proof := base64.RawStdEncoding.EncodeToString(GenerateProof(verifier, nonce))
+	raw, _ := json.Marshal(map[string]string{
+		"email": "ok@example.com",
+		"proof": proof,
+		"nonce": base64.RawStdEncoding.EncodeToString(nonce),
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
