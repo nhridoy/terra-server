@@ -52,6 +52,8 @@ func main() {
 	apiAuth.POST("/logout", auth.HandleLogout(db))
 	apiAuth.POST("/recovery", auth.HandleRecovery(db, cfg))
 	apiAuth.POST("/recovery/prefetch", auth.HandleRecoveryPrefetch(db))
+	apiAuth.POST("/verify-email", auth.RateLimit(cfg.RateLimitAuth), auth.HandleVerifyEmail(db, cfg))
+	apiAuth.POST("/resend-verification", auth.RateLimit(cfg.RateLimitAuth), auth.HandleResendVerification(db, cfg))
 	apiAuth.GET("/oauth/start/:provider", auth.HandleOAuthStart(db, cfg))
 	apiAuth.GET("/oauth/callback/:provider", auth.HandleOAuthCallback(db, cfg))
 	apiAuth.POST("/oauth/exchange", auth.HandleOAuthExchange(db, cfg))
