@@ -60,6 +60,29 @@ func testConfig() *config.Config {
 	}
 }
 
+func testConfigWithVerification() *config.Config {
+	cfg := testConfig()
+	cfg.RequireEmailVerification = true
+	return cfg
+}
+
+func registerRequestPayload(email, userID string) map[string]interface{} {
+	return map[string]interface{}{
+		"user_id":       userID,
+		"email":         email,
+		"full_name":     email,
+		"password_hash": base64.RawStdEncoding.EncodeToString([]byte("verifier-bytes")),
+		"keyring": map[string]string{
+			"dek_wrapped_by_kek":         "kek",
+			"dek_wrapped_by_recovery":    "rec",
+			"private_key_wrapped_by_dek": "pk",
+		},
+		"kdf":         map[string]int{"m": 32768, "t": 2, "p": 1},
+		"server_salt": "server-salt",
+		"salt_cl":     "salt-cl",
+	}
+}
+
 func seedUserWithVerifier(t *testing.T, db *gorm.DB, email string) (uuid.UUID, []byte) {
 	t.Helper()
 	userID := uuid.New()
@@ -404,6 +427,82 @@ func TestRegister_Idempotent(t *testing.T) {
 	data := resp["data"].(map[string]interface{})
 	if data["access_token"] == nil || data["access_token"] == "" {
 		t.Error("access_token should not be empty")
+	}
+}
+
+func TestRegister_VerificationRequired_NoTokens(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+
+	body := registerRequestPayload("verify@example.com", uuid.New().String())
+	raw, _ := json.Marshal(body)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/auth/register", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			VerificationRequired bool   `json:"verification_required"`
+			AccessToken          string `json:"access_token"`
+			RefreshToken         string `json:"refresh_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Data.VerificationRequired {
+		t.Fatal("expected verification_required true")
+	}
+	if resp.Data.AccessToken != "" || resp.Data.RefreshToken != "" {
+		t.Fatal("expected no tokens in register response")
+	}
+
+	var user models.User
+	if err := db.Where("email = ?", "verify@example.com").First(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	if user.EmailVerifiedAt != nil {
+		t.Fatal("expected user unverified")
+	}
+	var codeCount int64
+	db.Model(&models.AuthCode{}).Where("user_id = ? AND purpose = ?", user.ID, emailVerifyPurpose).Count(&codeCount)
+	if codeCount != 1 {
+		t.Fatalf("expected 1 verification code, got %d", codeCount)
+	}
+}
+
+func TestRegister_VerificationOff_ReturnsTokens(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfig())
+
+	body := registerRequestPayload("plain@example.com", uuid.New().String())
+	raw, _ := json.Marshal(body)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/auth/register", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			VerificationRequired bool   `json:"verification_required"`
+			AccessToken          string `json:"access_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Data.AccessToken == "" {
+		t.Fatal("expected access token when verification off")
+	}
+	if resp.Data.VerificationRequired {
+		t.Fatal("expected no verification_required flag")
 	}
 }
 
@@ -1209,11 +1308,11 @@ func TestRecovery_ReplacesKeyring(t *testing.T) {
 
 	nonce := base64.RawStdEncoding.EncodeToString([]byte("keyring-nonce"))
 	body, _ := json.Marshal(gin.H{
-		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
-		"signature":     recoverySignature(t, nonce),
-		"new_verifier":  "recovered-v",
+		"recovery_code":     base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
+		"signature":         recoverySignature(t, nonce),
+		"new_verifier":      "recovered-v",
 		"new_encrypted_dek": "new-dek-payload",
-		"new_nonce":     nonce,
+		"new_nonce":         nonce,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

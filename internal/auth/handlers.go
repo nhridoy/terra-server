@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/termvault/termvault/internal/config"
+	"github.com/termvault/termvault/internal/email"
 	"github.com/termvault/termvault/internal/models"
 	"gorm.io/gorm"
 )
@@ -32,16 +34,16 @@ type keyringPayload struct {
 }
 
 type registerRequest struct {
-	UserID           string         `json:"user_id" binding:"required"`
-	Email            string         `json:"email" binding:"required"`
-	FullName         string         `json:"full_name"`
-	PasswordHash     string         `json:"password_hash" binding:"required"`
-	RecoveryCode     string         `json:"recovery_code"`
-	PublicKey        string         `json:"public_key"`
-	Keyring          keyringPayload `json:"keyring"`
-	KDF              kdfParams      `json:"kdf"`
-	ServerSalt       string         `json:"server_salt" binding:"required"`
-	SaltCL           string         `json:"salt_cl" binding:"required"`
+	UserID       string         `json:"user_id" binding:"required"`
+	Email        string         `json:"email" binding:"required"`
+	FullName     string         `json:"full_name"`
+	PasswordHash string         `json:"password_hash" binding:"required"`
+	RecoveryCode string         `json:"recovery_code"`
+	PublicKey    string         `json:"public_key"`
+	Keyring      keyringPayload `json:"keyring"`
+	KDF          kdfParams      `json:"kdf"`
+	ServerSalt   string         `json:"server_salt" binding:"required"`
+	SaltCL       string         `json:"salt_cl" binding:"required"`
 }
 
 func HandlePrelogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
@@ -102,6 +104,22 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 
 		var existing models.User
 		if db.Where("id = ?", userID).First(&existing).Error == nil {
+			if cfg.RequireEmailVerification && existing.EmailVerifiedAt == nil {
+				otp, err := issueEmailVerifyCode(db, userID)
+				if err != nil {
+					Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create verification code")
+					return
+				}
+				sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom)
+				if err := sender.SendOtp(existing.Email, otp); err != nil {
+					slog.Error("failed to send verification otp", "email", existing.Email, "error", err)
+				}
+				Success(c, http.StatusCreated, gin.H{
+					"verification_required": true,
+					"user":                  existing,
+				})
+				return
+			}
 			rt, err := createRefreshToken(db, userID, "", cfg)
 			if err != nil {
 				Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create refresh token")
@@ -174,6 +192,23 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 
 		if err := models.SeedPersonalVault(db, userID); err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to seed vault")
+			return
+		}
+
+		if cfg.RequireEmailVerification {
+			otp, err := issueEmailVerifyCode(db, userID)
+			if err != nil {
+				Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create verification code")
+				return
+			}
+			sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom)
+			if err := sender.SendOtp(user.Email, otp); err != nil {
+				slog.Error("failed to send verification otp", "email", user.Email, "error", err)
+			}
+			Success(c, http.StatusCreated, gin.H{
+				"verification_required": true,
+				"user":                  user,
+			})
 			return
 		}
 
