@@ -408,6 +408,20 @@ func TestOAuthExchange_ValidCode(t *testing.T) {
 	if ac.UsedAt == nil {
 		t.Error("setup code should be marked as used")
 	}
+
+	// Regression: the refresh token must be persisted server-side so the
+	// client can refresh after a relaunch. Previously the OAuth paths
+	// returned a JWT that was never stored -> 401 "invalid refresh token".
+	r.POST("/api/v1/auth/refresh", HandleRefresh(db, cfg))
+	rt := data["refresh_token"].(string)
+	body2, _ := json.Marshal(gin.H{"refresh_token": rt})
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected refresh 200, got %d: %s", w2.Code, w2.Body.String())
+	}
 }
 
 func TestOAuthExchange_ExpiredCode(t *testing.T) {
@@ -521,6 +535,19 @@ func TestOAuthSetup_ValidSetupToken(t *testing.T) {
 	}
 	if data["refresh_token"] == nil || data["refresh_token"] == "" {
 		t.Error("refresh_token should not be empty")
+	}
+
+	// Regression: oauth/setup must persist the refresh token server-side,
+	// otherwise the first relaunch after signup logs the user out.
+	r.POST("/api/v1/auth/refresh", HandleRefresh(db, cfg))
+	rt := data["refresh_token"].(string)
+	body2, _ := json.Marshal(gin.H{"refresh_token": rt})
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected refresh 200 after oauth setup, got %d: %s", w2.Code, w2.Body.String())
 	}
 
 	var user models.User

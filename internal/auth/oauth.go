@@ -391,7 +391,13 @@ func HandleOAuthCallback(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		at, rt, err := GenerateTokenPair(user.ID, oauthState.DeviceID, cfg)
+		rt, err := createRefreshToken(db, user.ID, oauthState.DeviceID, cfg)
+		if err != nil {
+			c.Redirect(http.StatusFound, oauthTargetURL(&oauthState, cfg, "error", url.Values{"message": []string{"token_generation_failed"}}))
+			return
+		}
+
+		at, _, err := GenerateTokenPair(user.ID, oauthState.DeviceID, cfg)
 		if err != nil {
 			c.Redirect(http.StatusFound, oauthTargetURL(&oauthState, cfg, "error", url.Values{"message": []string{"token_generation_failed"}}))
 			return
@@ -456,7 +462,13 @@ func HandleOAuthExchange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		at, rt, err := GenerateTokenPair(userID, ac.DeviceID, cfg)
+		rt, err := createRefreshToken(db, userID, ac.DeviceID, cfg)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create refresh token")
+			return
+		}
+
+		at, _, err := GenerateTokenPair(userID, ac.DeviceID, cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 			return
@@ -559,7 +571,13 @@ func HandleOAuthSetup(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		at, rt, err := GenerateTokenPair(user.ID, ac.DeviceID, cfg)
+		rt, err := createRefreshToken(db, user.ID, ac.DeviceID, cfg)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create refresh token")
+			return
+		}
+
+		at, _, err := GenerateTokenPair(user.ID, ac.DeviceID, cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 			return

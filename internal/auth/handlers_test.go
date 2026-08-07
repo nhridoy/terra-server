@@ -253,6 +253,18 @@ func TestRegister_NewUser(t *testing.T) {
 		t.Error("refresh_token should not be empty")
 	}
 
+	// Regression: register must persist the refresh token server-side,
+	// otherwise a relaunch cannot refresh and the user gets logged out.
+	rt := data["refresh_token"].(string)
+	body2, _ := json.Marshal(gin.H{"refresh_token": rt})
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected refresh 200 after register, got %d: %s", w2.Code, w2.Body.String())
+	}
+
 	userObj, ok := data["user"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected user object, got %v", data["user"])

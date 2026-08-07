@@ -103,7 +103,12 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 
 		var existing models.User
 		if db.Where("id = ?", userID).First(&existing).Error == nil {
-			at, rt, err := GenerateTokenPair(userID, "", cfg)
+			rt, err := createRefreshToken(db, userID, "", cfg)
+			if err != nil {
+				Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create refresh token")
+				return
+			}
+			at, _, err := GenerateTokenPair(userID, "", cfg)
 			if err != nil {
 				Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 				return
@@ -173,7 +178,13 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		at, rt, err := GenerateTokenPair(userID, "", cfg)
+		rt, err := createRefreshToken(db, userID, "", cfg)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create refresh token")
+			return
+		}
+
+		at, _, err := GenerateTokenPair(userID, "", cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 			return
