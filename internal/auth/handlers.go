@@ -814,6 +814,43 @@ func HandleVerifyEmail(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
+func HandleResendVerification(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req struct {
+			Email string `json:"email" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "email is required")
+			return
+		}
+
+		var user models.User
+		if db.Where("email = ?", req.Email).First(&user).Error != nil ||
+			user.AuthProvider != "password" || user.EmailVerifiedAt != nil {
+			Success(c, http.StatusOK, gin.H{"verification_required": true})
+			return
+		}
+
+		existing, err := findEmailVerifyCode(db, user.ID)
+		if err == nil && time.Since(existing.CreatedAt) < time.Minute {
+			Error(c, http.StatusTooManyRequests, "TOO_MANY_REQUESTS", "wait before requesting a new code")
+			return
+		}
+
+		otp, err := issueEmailVerifyCode(db, user.ID)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create verification code")
+			return
+		}
+		sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom)
+		if err := sender.SendOtp(user.Email, otp); err != nil {
+			slog.Error("failed to send verification otp", "email", user.Email, "error", err)
+		}
+
+		Success(c, http.StatusOK, gin.H{"verification_required": true})
+	}
+}
+
 func hashToken(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return base64.RawStdEncoding.EncodeToString(h[:])

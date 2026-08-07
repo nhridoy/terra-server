@@ -39,6 +39,7 @@ func setupHandlerRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	auth.POST("/prelogin", HandlePrelogin(db, cfg))
 	auth.POST("/register", HandleRegister(db, cfg))
 	auth.POST("/verify-email", HandleVerifyEmail(db, cfg))
+	auth.POST("/resend-verification", HandleResendVerification(db, cfg))
 	auth.POST("/login", HandleLogin(db, cfg))
 	auth.POST("/refresh", HandleRefresh(db, cfg))
 	auth.POST("/logout", HandleLogout(db))
@@ -1693,5 +1694,70 @@ func TestLogin_Verified_Succeeds(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestResendVerification_ReplacesCode(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+	userID, otp := seedUnverifiedUser(t, db, "resend@example.com")
+
+	// wait out cooldown: backdate the existing row
+	db.Model(&models.AuthCode{}).Where("user_id = ? AND purpose = ?", userID, emailVerifyPurpose).
+		Update("created_at", time.Now().Add(-time.Minute))
+
+	raw, _ := json.Marshal(map[string]string{"email": "resend@example.com"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/auth/resend-verification", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	code, err := findEmailVerifyCode(db, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256([]byte(otp))
+	if string(code.CodeHash) == string(hash[:]) {
+		t.Fatal("expected old otp to be replaced")
+	}
+	var count int64
+	db.Model(&models.AuthCode{}).Where("user_id = ? AND purpose = ?", userID, emailVerifyPurpose).Count(&count)
+	if count != 1 {
+		t.Fatalf("expected exactly 1 row, got %d", count)
+	}
+}
+
+func TestResendVerification_Cooldown(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+	seedUnverifiedUser(t, db, "cooldown@example.com")
+
+	raw, _ := json.Marshal(map[string]string{"email": "cooldown@example.com"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/auth/resend-verification", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestResendVerification_UnknownEmail_Uniform(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+
+	raw, _ := json.Marshal(map[string]string{"email": "ghost@example.com"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/auth/resend-verification", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (no enumeration), got %d", w.Code)
 	}
 }
