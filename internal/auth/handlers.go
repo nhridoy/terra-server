@@ -110,7 +110,8 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 
 		var existing models.User
 		if db.Where("id = ?", userID).First(&existing).Error == nil {
-			if cfg.RequireEmailVerification && existing.EmailVerifiedAt == nil {
+			if cfg.RequireEmailVerification &&
+				existing.AuthProvider == "password" && existing.EmailVerifiedAt == nil {
 				respondVerificationRequired(c, db, cfg, &existing)
 				return
 			}
@@ -223,6 +224,8 @@ func respondVerificationRequired(c *gin.Context, db *gorm.DB, cfg *config.Config
 	sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom)
 	if err := sender.SendOtp(user.Email, otp); err != nil {
 		slog.Error("failed to send verification otp", "email", user.Email, "error", err)
+		Error(c, http.StatusServiceUnavailable, "EMAIL_DELIVERY_FAILED", "verification email could not be sent, please try again")
+		return
 	}
 	Success(c, http.StatusCreated, gin.H{
 		"verification_required": true,
@@ -279,7 +282,7 @@ func HandleLogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		if cfg.RequireEmailVerification && user.EmailVerifiedAt == nil {
+		if cfg.RequireEmailVerification && user.AuthProvider == "password" && user.EmailVerifiedAt == nil {
 			c.JSON(http.StatusForbidden, gin.H{"error": gin.H{
 				"code":       "VERIFICATION_REQUIRED",
 				"message":    "verify your email",
@@ -845,6 +848,8 @@ func HandleResendVerification(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom)
 		if err := sender.SendOtp(user.Email, otp); err != nil {
 			slog.Error("failed to send verification otp", "email", user.Email, "error", err)
+			Error(c, http.StatusServiceUnavailable, "EMAIL_DELIVERY_FAILED", "verification email could not be sent, please try again")
+			return
 		}
 
 		Success(c, http.StatusOK, gin.H{"verification_required": true})
