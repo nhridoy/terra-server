@@ -51,7 +51,7 @@ func setupHandlerRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	protected.GET("/me", HandleMe(db))
 	protected.GET("/auth/keyring", HandleKeyring(db))
 	protected.POST("/auth/password-change", HandlePasswordChange(db, cfg))
-	protected.POST("/auth/recovery-material", HandleAttachRecoveryMaterial(db))
+	protected.POST("/auth/recovery-material", HandleAttachRecoveryMaterial(db, cfg))
 	return r
 }
 
@@ -1830,7 +1830,7 @@ func TestAttachRecoveryMaterial_ConflictWhenAlreadySet(t *testing.T) {
 
 func TestAttachRecoveryMaterial_UnverifiedForbidden(t *testing.T) {
 	db := setupTestDB(t)
-	cfg := testConfig()
+	cfg := testConfigWithVerification()
 	r := setupHandlerRouter(db, cfg)
 
 	uid, _ := seedUserWithVerifier(t, db, "attach-unverified@example.com")
@@ -1841,6 +1841,27 @@ func TestAttachRecoveryMaterial_UnverifiedForbidden(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAttachRecoveryMaterial_UnverifiedAllowedWhenVerificationOff(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, _ := seedUserWithVerifier(t, db, "attach-ungated@example.com")
+
+	token := makeAccessToken(uid, cfg)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeAttachRecoveryRequest(t, token, "attach-code"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var uk models.UserKey
+	if db.Where("user_id = ? AND key_type = ?", uid, "dek_wrapped_by_recovery").First(&uk).Error != nil {
+		t.Fatal("dek_wrapped_by_recovery row should exist")
 	}
 }
 

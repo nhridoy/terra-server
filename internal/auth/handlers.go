@@ -700,7 +700,7 @@ type attachRecoveryMaterialRequest struct {
 // an already-verified account. Signup defers kit creation until email
 // verification so the code is always generated client-side on the verifying
 // device; this endpoint is the server-side half of that attach.
-func HandleAttachRecoveryMaterial(db *gorm.DB) gin.HandlerFunc {
+func HandleAttachRecoveryMaterial(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, exists := c.Get("user_id")
 		if !exists {
@@ -726,7 +726,7 @@ func HandleAttachRecoveryMaterial(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		if user.EmailVerifiedAt == nil {
+		if cfg.RequireEmailVerification && user.AuthProvider == "password" && user.EmailVerifiedAt == nil {
 			Error(c, http.StatusForbidden, "FORBIDDEN", "email not verified")
 			return
 		}

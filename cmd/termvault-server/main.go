@@ -64,7 +64,7 @@ func main() {
 	protected.GET("/me", auth.HandleMe(db))
 	protected.GET("/auth/keyring", auth.HandleKeyring(db))
 	protected.POST("/auth/password-change", auth.HandlePasswordChange(db, cfg))
-	protected.POST("/auth/recovery-material", auth.RateLimit(cfg.RateLimitAuth), auth.HandleAttachRecoveryMaterial(db))
+	protected.POST("/auth/recovery-material", auth.RateLimit(cfg.RateLimitAuth), auth.HandleAttachRecoveryMaterial(db, cfg))
 
 	addr := cfg.Host + ":" + cfg.Port
 
