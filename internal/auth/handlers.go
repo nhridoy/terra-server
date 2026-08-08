@@ -27,6 +27,20 @@ type kdfParams struct {
 	P int `json:"p"`
 }
 
+// Minimum KDF policy. The verifier's brute-force cost is set by the params
+// chosen at account creation, so the server never accepts weaker values —
+// a malicious client could otherwise register accounts that are cheap to
+// brute-force. Values above the minimums are allowed (flexible policy).
+const (
+	minKDFMemoryKiB = 32 * 1024
+	minKDFTime      = 2
+	minKDFParallel  = 1
+)
+
+func validKDF(k kdfParams) bool {
+	return k.M >= minKDFMemoryKiB && k.T >= minKDFTime && k.P >= minKDFParallel
+}
+
 type keyringPayload struct {
 	DekWrappedByKek        string `json:"dek_wrapped_by_kek"`
 	DekWrappedByRecovery   string `json:"dek_wrapped_by_recovery"`
@@ -102,6 +116,11 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
+		if !validKDF(req.KDF) {
+			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid kdf parameters")
+			return
+		}
+
 		userID, err := uuid.Parse(req.UserID)
 		if err != nil {
 			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid user_id")
@@ -129,6 +148,7 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 				"access_token":  at,
 				"refresh_token": rt,
 				"user":          existing,
+				"keyring":       fetchKeyring(db, existing.ID),
 			})
 			return
 		}
@@ -211,6 +231,7 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			"access_token":  at,
 			"refresh_token": rt,
 			"user":          user,
+			"keyring":       fetchKeyring(db, user.ID),
 		})
 	}
 }
@@ -453,6 +474,11 @@ func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		expectedProof := GenerateProof(verifierBytes, oldNonceBytes)
 		if !ConstantTimeCompare(oldProofBytes, expectedProof) {
 			Error(c, http.StatusForbidden, "FORBIDDEN", "current password is incorrect")
+			return
+		}
+
+		if req.NewKDF.M != 0 && !validKDF(req.NewKDF) {
+			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid kdf parameters")
 			return
 		}
 

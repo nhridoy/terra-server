@@ -561,6 +561,11 @@ func HandleOAuthSetup(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
+		if !validKDF(req.KDF) {
+			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid kdf parameters")
+			return
+		}
+
 		var recoveryHash *string
 		if req.RecoveryCode != "" {
 			codeBytes, err := base64.RawStdEncoding.DecodeString(req.RecoveryCode)

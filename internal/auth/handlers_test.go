@@ -306,9 +306,7 @@ func TestRegister_NewUser(t *testing.T) {
 		"password_hash":     "base64-verifier",
 		"encrypted_dek":     "base64-dek",
 		"encrypted_privkey": "base64-privkey",
-		"kdf_m":             67108864,
-		"kdf_t":             3,
-		"kdf_p":             1,
+		"kdf":               map[string]int{"m": 67108864, "t": 3, "p": 1},
 		"server_salt":       "server-salt",
 		"salt_cl":           "client-salt",
 	})
@@ -387,9 +385,7 @@ func TestRegister_ExistingEmail(t *testing.T) {
 		"user_id":       uuid.New().String(),
 		"email":         "taken@example.com",
 		"password_hash": "base64-verifier",
-		"kdf_m":         67108864,
-		"kdf_t":         3,
-		"kdf_p":         1,
+		"kdf":           map[string]int{"m": 67108864, "t": 3, "p": 1},
 		"server_salt":   "server-salt",
 		"salt_cl":       "client-salt",
 	})
@@ -428,9 +424,7 @@ func TestRegister_Idempotent(t *testing.T) {
 		"user_id":       userID.String(),
 		"email":         "idempotent@example.com",
 		"password_hash": "base64-verifier",
-		"kdf_m":         67108864,
-		"kdf_t":         3,
-		"kdf_p":         1,
+		"kdf":           map[string]int{"m": 67108864, "t": 3, "p": 1},
 		"server_salt":   "new-server-salt",
 		"salt_cl":       "new-client-salt",
 	})
@@ -780,9 +774,7 @@ func TestRegister_StoresKeyringAndRecovery(t *testing.T) {
 			"dek_wrapped_by_recovery":    "dek-b",
 			"private_key_wrapped_by_dek": "priv-c",
 		},
-		"kdf_m":       67108864,
-		"kdf_t":       3,
-		"kdf_p":       1,
+		"kdf":         map[string]int{"m": 67108864, "t": 3, "p": 1},
 		"server_salt": "server-salt",
 		"salt_cl":     "client-salt",
 	})
@@ -1886,5 +1878,67 @@ func TestAttachRecoveryMaterial_HealsMissingRow(t *testing.T) {
 	var uk models.UserKey
 	if db.Where("user_id = ? AND key_type = ?", uid, "dek_wrapped_by_recovery").First(&uk).Error != nil {
 		t.Fatal("dek_wrapped_by_recovery row should have been restored")
+	}
+}
+
+func TestRegister_WeakKDF_Rejected(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	body, _ := json.Marshal(gin.H{
+		"user_id":       uuid.New().String(),
+		"email":         "weak-kdf@example.com",
+		"full_name":     "weak-kdf@example.com",
+		"password_hash": base64.RawStdEncoding.EncodeToString([]byte("verifier-bytes")),
+		"keyring": map[string]string{
+			"dek_wrapped_by_kek":         "kek",
+			"dek_wrapped_by_recovery":    "rec",
+			"private_key_wrapped_by_dek": "pk",
+		},
+		"kdf":         map[string]int{"m": 1024, "t": 1, "p": 1},
+		"server_salt": "server-salt",
+		"salt_cl":     "salt-cl",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var count int64
+	db.Model(&models.User{}).Where("email = ?", "weak-kdf@example.com").Count(&count)
+	if count != 0 {
+		t.Error("user should not have been created with weak kdf")
+	}
+}
+
+func TestPasswordChange_WeakKDF_Rejected(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, verifier := seedUserWithVerifier(t, db, "pwchange-weak-kdf@example.com")
+	token := makeAccessToken(uid, cfg)
+
+	nonce := []byte("nonce-for-weak-kdf")
+	proof := GenerateProof(verifier, nonce)
+
+	body, _ := json.Marshal(gin.H{
+		"old_proof":    base64.RawStdEncoding.EncodeToString(proof),
+		"old_nonce":    base64.RawStdEncoding.EncodeToString(nonce),
+		"new_verifier": "new-verifier-value",
+		"new_kdf":      gin.H{"m": 1024, "t": 1, "p": 1},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password-change", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }

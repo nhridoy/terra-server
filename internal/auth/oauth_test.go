@@ -734,6 +734,7 @@ func TestOAuthSetup_WithoutKeyring(t *testing.T) {
 	body, _ := json.Marshal(gin.H{
 		"setup_token":   "no-keyring-token",
 		"auth_verifier": "new-verifier",
+		"kdf":           gin.H{"m": 65536, "t": 3, "p": 2},
 		"server_salt":   "server-salt",
 		"salt_cl":       "client-salt",
 	})
@@ -795,6 +796,31 @@ func TestOAuthExchange_EmptyBody(t *testing.T) {
 	r := oauthRouter(db, cfg)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/exchange", bytes.NewReader([]byte("{}")))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestOAuthSetup_WeakKDF_Rejected(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := oauthTestConfig()
+	r := oauthRouter(db, cfg)
+
+	uid := seedOAuthUser(t, db, "google", "12345", "weak-kdf-setup@example.com", false)
+	seedAuthCode(t, db, "weak-kdf-setup-token", "oauth_setup", uid, "dev1", time.Now().Add(15*time.Minute), nil)
+
+	body, _ := json.Marshal(gin.H{
+		"setup_token":   "weak-kdf-setup-token",
+		"auth_verifier": "new-verifier",
+		"server_salt":   "server-salt",
+		"salt_cl":       "client-salt",
+		"kdf":           gin.H{"m": 1024, "t": 1, "p": 1},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/setup", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
