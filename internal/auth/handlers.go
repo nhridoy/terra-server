@@ -665,6 +665,74 @@ func fetchKeyring(db *gorm.DB, userID uuid.UUID) *map[string]string {
 	return &keyring
 }
 
+type attachRecoveryMaterialRequest struct {
+	RecoveryCode         string `json:"recovery_code" binding:"required"`
+	DekWrappedByRecovery string `json:"dek_wrapped_by_recovery" binding:"required"`
+}
+
+// HandleAttachRecoveryMaterial stores the recovery kit (hash + wrapped DEK) for
+// an already-verified account. Signup defers kit creation until email
+// verification so the code is always generated client-side on the verifying
+// device; this endpoint is the server-side half of that attach.
+func HandleAttachRecoveryMaterial(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, exists := c.Get("user_id")
+		if !exists {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "missing user context")
+			return
+		}
+
+		var req attachRecoveryMaterialRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "recovery_code and dek_wrapped_by_recovery are required")
+			return
+		}
+
+		codeBytes, err := base64.RawStdEncoding.DecodeString(req.RecoveryCode)
+		if err != nil {
+			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid recovery_code encoding")
+			return
+		}
+
+		var user models.User
+		if db.Where("id = ?", userID).First(&user).Error != nil {
+			Error(c, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+
+		if user.EmailVerifiedAt == nil {
+			Error(c, http.StatusForbidden, "FORBIDDEN", "email not verified")
+			return
+		}
+
+		codeHash := sha256.Sum256(codeBytes)
+		hashB64 := base64.RawStdEncoding.EncodeToString(codeHash[:])
+
+		var uk models.UserKey
+		rowExists := db.Where("user_id = ? AND key_type = ?", user.ID, "dek_wrapped_by_recovery").First(&uk).Error == nil
+		if user.RecoveryHash != nil && rowExists {
+			Error(c, http.StatusConflict, "RECOVERY_ALREADY_EXISTS", "recovery material already set for this account")
+			return
+		}
+
+		// Row and hash are written atomically so a partial failure rolls back
+		// and the client simply retries on the next login.
+		err = db.Transaction(func(tx *gorm.DB) error {
+			if err := upsertUserKey(tx, user.ID, "dek_wrapped_by_recovery", req.DekWrappedByRecovery); err != nil {
+				return err
+			}
+			return tx.Model(&user).Update("recovery_hash", &hashB64).Error
+		})
+		if err != nil {
+			slog.Error("failed to store recovery material", "error", err)
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to store recovery material")
+			return
+		}
+
+		Success(c, http.StatusOK, gin.H{"recovery_attached": true})
+	}
+}
+
 func HandleRecoveryPrefetch(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req recoveryPrefetchRequest

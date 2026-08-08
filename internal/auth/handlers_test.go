@@ -51,6 +51,7 @@ func setupHandlerRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	protected.GET("/me", HandleMe(db))
 	protected.GET("/auth/keyring", HandleKeyring(db))
 	protected.POST("/auth/password-change", HandlePasswordChange(db, cfg))
+	protected.POST("/auth/recovery-material", HandleAttachRecoveryMaterial(db))
 	return r
 }
 
@@ -1759,5 +1760,131 @@ func TestResendVerification_UnknownEmail_Uniform(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 (no enumeration), got %d", w.Code)
+	}
+}
+
+func makeAttachRecoveryRequest(t *testing.T, token, recoveryCode string) *http.Request {
+	t.Helper()
+	body, _ := json.Marshal(gin.H{
+		"recovery_code":           base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
+		"dek_wrapped_by_recovery": "wrapped-dek-blob",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/recovery-material", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return req
+}
+
+func TestAttachRecoveryMaterial_StoresRowAndHash(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, _ := seedUserWithVerifier(t, db, "attach@example.com")
+	now := time.Now()
+	db.Model(&models.User{}).Where("id = ?", uid).Update("email_verified_at", &now)
+
+	token := makeAccessToken(uid, cfg)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeAttachRecoveryRequest(t, token, "attach-code"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	codeHash := sha256.Sum256([]byte("attach-code"))
+	expectedHash := base64.RawStdEncoding.EncodeToString(codeHash[:])
+	var user models.User
+	db.First(&user, "id = ?", uid)
+	if user.RecoveryHash == nil || *user.RecoveryHash != expectedHash {
+		t.Errorf("recovery_hash: want %q, got %v", expectedHash, user.RecoveryHash)
+	}
+	var uk models.UserKey
+	if db.Where("user_id = ? AND key_type = ?", uid, "dek_wrapped_by_recovery").First(&uk).Error != nil {
+		t.Fatal("dek_wrapped_by_recovery row should exist")
+	}
+	if uk.Payload != "wrapped-dek-blob" {
+		t.Errorf("payload: want wrapped-dek-blob, got %q", uk.Payload)
+	}
+}
+
+func TestAttachRecoveryMaterial_ConflictWhenAlreadySet(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, _ := seedUserWithVerifier(t, db, "attach-conflict@example.com")
+	now := time.Now()
+	db.Model(&models.User{}).Where("id = ?", uid).Updates(map[string]interface{}{
+		"email_verified_at": &now,
+	})
+	seedRecoveryCode(db, uid, "existing-code")
+	db.Create(&models.UserKey{
+		UserID:  uid,
+		KeyType: "dek_wrapped_by_recovery",
+		Payload: "existing-blob",
+	})
+
+	token := makeAccessToken(uid, cfg)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeAttachRecoveryRequest(t, token, "attach-code"))
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAttachRecoveryMaterial_UnverifiedForbidden(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, _ := seedUserWithVerifier(t, db, "attach-unverified@example.com")
+
+	token := makeAccessToken(uid, cfg)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeAttachRecoveryRequest(t, token, "attach-code"))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAttachRecoveryMaterial_RequiresAuth(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfig())
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeAttachRecoveryRequest(t, "", "attach-code"))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAttachRecoveryMaterial_HealsMissingRow(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, _ := seedUserWithVerifier(t, db, "attach-heal@example.com")
+	now := time.Now()
+	db.Model(&models.User{}).Where("id = ?", uid).Updates(map[string]interface{}{
+		"email_verified_at": &now,
+	})
+	seedRecoveryCode(db, uid, "stale-hash")
+
+	token := makeAccessToken(uid, cfg)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeAttachRecoveryRequest(t, token, "attach-code"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (hash exists but row missing → heal), got %d: %s", w.Code, w.Body.String())
+	}
+	var uk models.UserKey
+	if db.Where("user_id = ? AND key_type = ?", uid, "dek_wrapped_by_recovery").First(&uk).Error != nil {
+		t.Fatal("dek_wrapped_by_recovery row should have been restored")
 	}
 }
