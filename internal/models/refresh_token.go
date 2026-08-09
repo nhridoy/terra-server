@@ -15,7 +15,6 @@ type RefreshToken struct {
 	ExpiresAt   time.Time  `gorm:"not null;index" json:"expires_at"`
 	RotatedAt   *time.Time `json:"rotated_at,omitempty"`
 	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
-	ReplacedBy  *uint      `gorm:"index;foreignkey:ReplacedBy;constraint:OnDelete:Set Null" json:"replaced_by,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 }
 

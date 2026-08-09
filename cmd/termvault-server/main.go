@@ -17,6 +17,13 @@ import (
 func main() {
 	cfg := config.Load()
 
+	if cfg.RequireEmailVerification && cfg.SMTPHost == "" && !cfg.LogOtpFallback {
+		slog.Error("REQUIRE_EMAIL_VERIFICATION is enabled but SMTP is not configured. " +
+			"Set SMTP_HOST (plus SMTP_PORT/USERNAME/PASSWORD/FROM), or set LOG_OTP_FALLBACK=true " +
+			"to log verification codes to the console — DEV ONLY, never in production")
+		os.Exit(1)
+	}
+
 	var db *gorm.DB
 	var err error
 
@@ -38,29 +45,35 @@ func main() {
 
 	r := gin.Default()
 
-	r.Use(auth.CORS())
+	r.Use(auth.RequestID())
+	r.Use(auth.CORS(cfg.CORSAllowedOrigins))
+
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		slog.Error("invalid TRUSTED_PROXIES, trusting no proxies", "error", err)
+		r.SetTrustedProxies(nil)
+	}
 
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{"message": "TermVault API"})
 	})
 
 	apiAuth := r.Group("/api/v1/auth")
-	apiAuth.POST("/prelogin", auth.HandlePrelogin(db, cfg))
-	apiAuth.POST("/register", auth.HandleRegister(db, cfg))
-	apiAuth.POST("/login", auth.HandleLogin(db, cfg))
-	apiAuth.POST("/refresh", auth.HandleRefresh(db, cfg))
-	apiAuth.POST("/logout", auth.HandleLogout(db))
-	apiAuth.POST("/recovery", auth.HandleRecovery(db, cfg))
-	apiAuth.POST("/recovery/prefetch", auth.HandleRecoveryPrefetch(db))
+	apiAuth.POST("/prelogin", auth.RateLimit(cfg.RateLimitAuth), auth.HandlePrelogin(db, cfg))
+	apiAuth.POST("/register", auth.RateLimit(cfg.RateLimitAuth), auth.HandleRegister(db, cfg))
+	apiAuth.POST("/login", auth.RateLimit(cfg.RateLimitAuth), auth.HandleLogin(db, cfg))
+	apiAuth.POST("/refresh", auth.RateLimit(cfg.RateLimitAuth), auth.HandleRefresh(db, cfg))
+	apiAuth.POST("/logout", auth.RateLimit(cfg.RateLimitAuth), auth.HandleLogout(db))
+	apiAuth.POST("/recovery", auth.RateLimit(cfg.RateLimitAuth), auth.HandleRecovery(db, cfg))
+	apiAuth.POST("/recovery/prefetch", auth.RateLimit(cfg.RateLimitAuth), auth.HandleRecoveryPrefetch(db))
 	apiAuth.POST("/verify-email", auth.RateLimit(cfg.RateLimitAuth), auth.HandleVerifyEmail(db, cfg))
 	apiAuth.POST("/resend-verification", auth.RateLimit(cfg.RateLimitAuth), auth.HandleResendVerification(db, cfg))
-	apiAuth.GET("/oauth/start/:provider", auth.HandleOAuthStart(db, cfg))
-	apiAuth.GET("/oauth/callback/:provider", auth.HandleOAuthCallback(db, cfg))
-	apiAuth.POST("/oauth/exchange", auth.HandleOAuthExchange(db, cfg))
-	apiAuth.POST("/oauth/setup", auth.HandleOAuthSetup(db, cfg))
+	apiAuth.GET("/oauth/start/:provider", auth.RateLimit(cfg.RateLimitAuth), auth.HandleOAuthStart(db, cfg))
+	apiAuth.GET("/oauth/callback/:provider", auth.RateLimit(cfg.RateLimitAuth), auth.HandleOAuthCallback(db, cfg))
+	apiAuth.POST("/oauth/exchange", auth.RateLimit(cfg.RateLimitAuth), auth.HandleOAuthExchange(db, cfg))
+	apiAuth.POST("/oauth/setup", auth.RateLimit(cfg.RateLimitAuth), auth.HandleOAuthSetup(db, cfg))
 
 	protected := r.Group("/api/v1")
-	protected.Use(auth.JWTMiddleware(cfg))
+	protected.Use(auth.RateLimit(cfg.RateLimitAPI), auth.JWTMiddleware(cfg))
 	protected.GET("/me", auth.HandleMe(db))
 	protected.GET("/auth/keyring", auth.HandleKeyring(db))
 	protected.POST("/auth/password-change", auth.HandlePasswordChange(db, cfg))

@@ -8,7 +8,7 @@ import (
 	"github.com/termvault/termvault/internal/config"
 )
 
-func TestGenerateTokenPair(t *testing.T) {
+func TestGenerateAccessToken(t *testing.T) {
 	cfg := &config.Config{
 		JWTSecret:         "test-secret",
 		JWTExpiry:         15 * time.Minute,
@@ -16,19 +16,12 @@ func TestGenerateTokenPair(t *testing.T) {
 	}
 	userID := uuid.New()
 	deviceID := "device-123"
-	accessToken, refreshToken, err := GenerateTokenPair(userID, deviceID, cfg)
+	accessToken, err := GenerateAccessToken(userID, deviceID, cfg)
 	if err != nil {
-		t.Fatalf("GenerateTokenPair failed: %v", err)
+		t.Fatalf("GenerateAccessToken failed: %v", err)
 	}
 	if accessToken == "" {
 		t.Fatal("access token is empty")
-	}
-	if refreshToken == "" {
-		t.Fatal("refresh token is empty")
-	}
-	// Both should be different
-	if accessToken == refreshToken {
-		t.Fatal("access and refresh tokens should be different")
 	}
 }
 
@@ -40,9 +33,9 @@ func TestVerifyAccessToken(t *testing.T) {
 	}
 	userID := uuid.New()
 	deviceID := "device-123"
-	accessToken, _, err := GenerateTokenPair(userID, deviceID, cfg)
+	accessToken, err := GenerateAccessToken(userID, deviceID, cfg)
 	if err != nil {
-		t.Fatalf("GenerateTokenPair failed: %v", err)
+		t.Fatalf("GenerateAccessToken failed: %v", err)
 	}
 	claims, err := VerifyAccessToken(accessToken, cfg)
 	if err != nil {
@@ -64,9 +57,9 @@ func TestVerifyAccessTokenExpired(t *testing.T) {
 	}
 	userID := uuid.New()
 	deviceID := "device-123"
-	accessToken, _, err := GenerateTokenPair(userID, deviceID, cfg)
+	accessToken, err := GenerateAccessToken(userID, deviceID, cfg)
 	if err != nil {
-		t.Fatalf("GenerateTokenPair failed: %v", err)
+		t.Fatalf("GenerateAccessToken failed: %v", err)
 	}
 	_, err = VerifyAccessToken(accessToken, cfg)
 	if err == nil {

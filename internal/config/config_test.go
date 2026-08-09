@@ -29,6 +29,26 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.SMTPPort != 587 {
 		t.Errorf("expected default SMTP port 587, got %d", cfg.SMTPPort)
 	}
+	if len(cfg.CORSAllowedOrigins) != 4 {
+		t.Errorf("expected 4 default CORS origins, got %d: %v", len(cfg.CORSAllowedOrigins), cfg.CORSAllowedOrigins)
+	}
+}
+
+func TestLoadCORSAllowedOrigins(t *testing.T) {
+	os.Setenv("CORS_ALLOWED_ORIGINS", "https://app.example.com, https://admin.example.com")
+	defer os.Unsetenv("CORS_ALLOWED_ORIGINS")
+
+	cfg := Load()
+
+	if len(cfg.CORSAllowedOrigins) != 2 {
+		t.Fatalf("expected 2 CORS origins, got %d: %v", len(cfg.CORSAllowedOrigins), cfg.CORSAllowedOrigins)
+	}
+	if cfg.CORSAllowedOrigins[0] != "https://app.example.com" {
+		t.Errorf("expected first origin https://app.example.com, got %s", cfg.CORSAllowedOrigins[0])
+	}
+	if cfg.CORSAllowedOrigins[1] != "https://admin.example.com" {
+		t.Errorf("expected second origin https://admin.example.com, got %s", cfg.CORSAllowedOrigins[1])
+	}
 }
 
 func TestLoadEmailVerificationToggle(t *testing.T) {
@@ -47,6 +67,24 @@ func TestLoadEmailVerificationToggle(t *testing.T) {
 		}
 	}
 	os.Unsetenv("REQUIRE_EMAIL_VERIFICATION")
+}
+
+func TestLoadLogOtpFallbackToggle(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"true", true}, {"TRUE", true}, {"1", true}, {"yes", true},
+		{"false", false}, {"0", false}, {"", false}, {"banana", false},
+	}
+	for _, c := range cases {
+		os.Setenv("LOG_OTP_FALLBACK", c.val)
+		cfg := Load()
+		if cfg.LogOtpFallback != c.want {
+			t.Errorf("LOG_OTP_FALLBACK=%q: got %v want %v", c.val, cfg.LogOtpFallback, c.want)
+		}
+	}
+	os.Unsetenv("LOG_OTP_FALLBACK")
 }
 
 func TestLoadEnvOverrides(t *testing.T) {

@@ -13,7 +13,7 @@ type Claims struct {
 	DeviceID string `json:"device_id"`
 }
 
-func GenerateTokenPair(userID uuid.UUID, deviceID string, cfg *config.Config) (accessToken string, refreshToken string, err error) {
+func GenerateAccessToken(userID uuid.UUID, deviceID string, cfg *config.Config) (string, error) {
 	now := time.Now()
 	accessClaims := Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -24,24 +24,7 @@ func GenerateTokenPair(userID uuid.UUID, deviceID string, cfg *config.Config) (a
 		},
 		DeviceID: deviceID,
 	}
-	accessToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims).SignedString([]byte(cfg.JWTSecret))
-	if err != nil {
-		return
-	}
-	refreshClaims := Claims{
-		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID.String(),
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(cfg.RefreshTokenExpiry)),
-			ID:        uuid.New().String(),
-		},
-		DeviceID: deviceID,
-	}
-	refreshToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims).SignedString([]byte(cfg.JWTSecret))
-	if err != nil {
-		return
-	}
-	return
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims).SignedString([]byte(cfg.JWTSecret))
 }
 
 func VerifyAccessToken(tokenString string, cfg *config.Config) (*Claims, error) {

@@ -295,7 +295,11 @@ func HandleOAuthStart(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		state := randBytes(32)
+		state, err := randBytes(32)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate OAuth state")
+			return
+		}
 		deviceID := c.Query("device_id")
 		if deviceID == "" {
 			deviceID = "default"
@@ -401,7 +405,11 @@ func HandleOAuthCallback(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		if !user.Initialized {
-			setupCode := randBytes(32)
+			setupCode, err := randBytes(32)
+			if err != nil {
+				c.Redirect(http.StatusFound, oauthTargetURL(&oauthState, cfg, "error", url.Values{"message": []string{"setup_code_failed"}}))
+				return
+			}
 			setupCodeHash := hashToken(setupCode)
 			ac := models.AuthCode{
 				CodeHash:  setupCodeHash,
@@ -427,7 +435,7 @@ func HandleOAuthCallback(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		at, _, err := GenerateTokenPair(user.ID, oauthState.DeviceID, cfg)
+		at, err := GenerateAccessToken(user.ID, oauthState.DeviceID, cfg)
 		if err != nil {
 			c.Redirect(http.StatusFound, oauthTargetURL(&oauthState, cfg, "error", url.Values{"message": []string{"token_generation_failed"}}))
 			return
@@ -498,7 +506,7 @@ func HandleOAuthExchange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		at, _, err := GenerateTokenPair(userID, ac.DeviceID, cfg)
+		at, err := GenerateAccessToken(userID, ac.DeviceID, cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 			return
@@ -601,6 +609,8 @@ func HandleOAuthSetup(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
+		clearLoginNonces(db, user.Email)
+
 		if err := seedKeyring(db, user.ID, req.Keyring); err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to store keyring")
 			return
@@ -612,7 +622,7 @@ func HandleOAuthSetup(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		at, _, err := GenerateTokenPair(user.ID, ac.DeviceID, cfg)
+		at, err := GenerateAccessToken(user.ID, ac.DeviceID, cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 			return

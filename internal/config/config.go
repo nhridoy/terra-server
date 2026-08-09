@@ -27,12 +27,14 @@ type Config struct {
 	RateLimitAuth            int
 	RateLimitAPI             int
 	TrustedProxies           []string
+	CORSAllowedOrigins       []string
 	RequireEmailVerification bool
-	SMTPHost                 string
-	SMTPPort                 int
-	SMTPUsername             string
-	SMTPPassword             string
-	SMTPFrom                 string
+	LogOtpFallback          bool
+	SMTPHost                string
+	SMTPPort                int
+	SMTPUsername            string
+	SMTPPassword            string
+	SMTPFrom                string
 }
 
 func Load() *Config {
@@ -71,6 +73,7 @@ func Load() *Config {
 	}
 
 	cfg.RequireEmailVerification = parseBoolEnv("REQUIRE_EMAIL_VERIFICATION", false)
+	cfg.LogOtpFallback = parseBoolEnv("LOG_OTP_FALLBACK", false)
 	cfg.SMTPHost = os.Getenv("SMTP_HOST")
 	cfg.SMTPPort = 587
 	if v := os.Getenv("SMTP_PORT"); v != "" {
@@ -87,6 +90,22 @@ func Load() *Config {
 			cidr = strings.TrimSpace(cidr)
 			if cidr != "" {
 				cfg.TrustedProxies = append(cfg.TrustedProxies, cidr)
+			}
+		}
+	}
+
+	cfg.CORSAllowedOrigins = []string{
+		"http://localhost:1420",
+		"http://127.0.0.1:1420",
+		"http://tauri.localhost",
+		"tauri://localhost",
+	}
+	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
+		cfg.CORSAllowedOrigins = nil
+		for _, o := range strings.Split(v, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				cfg.CORSAllowedOrigins = append(cfg.CORSAllowedOrigins, o)
 			}
 		}
 	}

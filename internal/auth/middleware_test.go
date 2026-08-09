@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -117,7 +118,7 @@ func TestJWTMiddleware_ExpiredToken(t *testing.T) {
 		RefreshTokenExpiry: 30 * 24 * time.Hour,
 	}
 	userID := uuid.New()
-	accessToken, _, _ := GenerateTokenPair(userID, "device-1", cfg)
+	accessToken, _ := GenerateAccessToken(userID, "device-1", cfg)
 
 	r := gin.New()
 	r.Use(RequestID())
@@ -143,7 +144,7 @@ func TestJWTMiddleware_ValidToken(t *testing.T) {
 		RefreshTokenExpiry: 30 * 24 * time.Hour,
 	}
 	userID := uuid.New()
-	accessToken, _, _ := GenerateTokenPair(userID, "device-1", cfg)
+	accessToken, _ := GenerateAccessToken(userID, "device-1", cfg)
 
 	r := gin.New()
 	r.Use(RequestID())
@@ -258,19 +259,76 @@ func TestRateLimit_DifferentIPsIndependent(t *testing.T) {
 	}
 }
 
+func TestRateLimit_XForwardedForSpoofDoesNotBypass(t *testing.T) {
+	r := gin.New()
+	r.SetTrustedProxies(nil)
+	r.Use(RateLimit(4))
+	r.GET("/test", func(c *gin.Context) {
+		c.JSON(200, gin.H{"ok": true})
+	})
+
+	for i := 0; i < 4; i++ {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("GET", "/test", nil)
+		req.RemoteAddr = "5.6.7.8:1234"
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("10.0.0.%d", i))
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d", i+1, w.Code)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "5.6.7.8:1234"
+	req.Header.Set("X-Forwarded-For", "10.0.0.99")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 despite spoofed X-Forwarded-For, got %d", w.Code)
+	}
+}
+
+func TestRateLimit_PreflightDoesNotConsumeBudget(t *testing.T) {
+	r := gin.New()
+	r.SetTrustedProxies(nil)
+	r.Use(RateLimit(1))
+	r.GET("/test", func(c *gin.Context) {
+		c.JSON(200, gin.H{"ok": true})
+	})
+
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("OPTIONS", "/test", nil)
+		req.RemoteAddr = "1.2.3.4:1234"
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("preflight %d: expected 404 (no route), got %d", i+1, w.Code)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "1.2.3.4:1234"
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expectated real request to pass after preflights, got %d", w.Code)
+	}
+}
+
 func TestCORS_SetsHeaders(t *testing.T) {
 	r := gin.New()
-	r.Use(CORS())
+	r.Use(CORS([]string{"http://localhost:1420", "tauri://localhost"}))
 	r.GET("/test", func(c *gin.Context) {
 		c.JSON(200, gin.H{"ok": true})
 	})
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/test", nil)
+	req.Header.Set("Origin", "http://localhost:1420")
 	r.ServeHTTP(w, req)
 
-	if w.Header().Get("Access-Control-Allow-Origin") == "" {
-		t.Fatal("Access-Control-Allow-Origin not set")
+	if w.Header().Get("Access-Control-Allow-Origin") != "http://localhost:1420" {
+		t.Fatalf("expected echo of allowed origin, got %q", w.Header().Get("Access-Control-Allow-Origin"))
 	}
 	if w.Header().Get("Access-Control-Allow-Methods") == "" {
 		t.Fatal("Access-Control-Allow-Methods not set")
@@ -282,18 +340,56 @@ func TestCORS_SetsHeaders(t *testing.T) {
 
 func TestCORS_PreflightRequest(t *testing.T) {
 	r := gin.New()
-	r.Use(CORS())
+	r.Use(CORS([]string{"http://localhost:1420", "tauri://localhost"}))
 	r.Handle("OPTIONS", "/test", func(c *gin.Context) {
 		c.JSON(200, gin.H{"ok": true})
 	})
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("OPTIONS", "/test", nil)
-	req.Header.Set("Origin", "http://example.com")
+	req.Header.Set("Origin", "http://localhost:1420")
 	req.Header.Set("Access-Control-Request-Method", "POST")
 	r.ServeHTTP(w, req)
 
 	if w.Header().Get("Access-Control-Allow-Origin") == "" {
 		t.Fatal("Access-Control-Allow-Origin not set on preflight")
+	}
+}
+
+func TestCORS_NoOrigin_PassesThrough(t *testing.T) {
+	r := gin.New()
+	r.Use(CORS([]string{"http://localhost:1420"}))
+	r.GET("/test", func(c *gin.Context) {
+		c.JSON(200, gin.H{"ok": true})
+	})
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for no-origin request, got %d", w.Code)
+	}
+}
+
+func TestCORS_DisallowedOrigin_Rejected(t *testing.T) {
+	r := gin.New()
+	r.Use(CORS([]string{"http://localhost:1420", "tauri://localhost"}))
+	r.GET("/test", func(c *gin.Context) {
+		c.JSON(200, gin.H{"ok": true})
+	})
+
+	for _, origin := range []string{"http://evil.example.com", "https://evil.example.com", "null"} {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("GET", "/test", nil)
+		req.Header.Set("Origin", origin)
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("origin %q: expected 403, got %d", origin, w.Code)
+		}
+		if w.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Fatalf("origin %q: must not echo Access-Control-Allow-Origin", origin)
+		}
 	}
 }

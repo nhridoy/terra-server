@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -83,7 +84,12 @@ func HandlePrelogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 				"t": user.KDFT,
 				"p": user.KDFP,
 			}
-			nonce := randBytes(32)
+			nonce, err := randBytes(32)
+			if err != nil {
+				Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate nonce")
+				return
+			}
+			storeLoginNonce(db, req.Email, nonce)
 			Success(c, http.StatusOK, gin.H{
 				"nonce":       nonce,
 				"kdf":         kdf,
@@ -98,12 +104,26 @@ func HandlePrelogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			"t": 2,
 			"p": 1,
 		}
-		nonce := randBytes(32)
+		nonce, err := randBytes(32)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate nonce")
+			return
+		}
+		serverSalt, err := randBytes(32)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate salt")
+			return
+		}
+		saltCL, err := randBytes(16)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate salt")
+			return
+		}
 		Success(c, http.StatusOK, gin.H{
 			"nonce":       nonce,
 			"kdf":         kdf,
-			"server_salt": randHex(32),
-			"salt_cl":     randHex(16),
+			"server_salt": serverSalt,
+			"salt_cl":     saltCL,
 		})
 	}
 }
@@ -129,6 +149,16 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 
 		var existing models.User
 		if db.Where("id = ?", userID).First(&existing).Error == nil {
+			// Idempotent retry guard: never mint tokens (or reissue a
+			// verification) for an existing account based on user_id alone.
+			// The caller must prove it knows the account's email and verifier,
+			// otherwise anyone who learns a leaked UUID could take over the
+			// session. A genuine retry re-sends the same verifier.
+			if existing.Email != req.Email || existing.AuthVerifier == nil ||
+				!ConstantTimeCompare([]byte(*existing.AuthVerifier), []byte(req.PasswordHash)) {
+				Error(c, http.StatusConflict, "CONFLICT", "email already registered")
+				return
+			}
 			if cfg.RequireEmailVerification &&
 				existing.AuthProvider == "password" && existing.EmailVerifiedAt == nil {
 				respondVerificationRequired(c, db, cfg, &existing)
@@ -139,7 +169,7 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 				Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create refresh token")
 				return
 			}
-			at, _, err := GenerateTokenPair(userID, "", cfg)
+			at, err := GenerateAccessToken(userID, "", cfg)
 			if err != nil {
 				Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 				return
@@ -154,6 +184,36 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		if db.Where("email = ?", req.Email).First(&existing).Error == nil {
+			if cfg.RequireEmailVerification {
+				// Uniform with a fresh registration: same status and body
+				// shape, with a user object built from the request (never the
+				// stored row) so an existing account is indistinguishable from
+				// a new signup. No OTP is issued here, so probing cannot spam
+				// the real owner's mailbox; a legit user whose account already
+				// exists can re-enter via login, which surfaces
+				// VERIFICATION_REQUIRED with a resend path.
+				fullName := req.FullName
+				if fullName == "" {
+					fullName = req.Email
+				}
+				neutral := models.User{
+					ID:           uuid.New(),
+					Email:        req.Email,
+					FullName:     fullName,
+					AuthProvider: "password",
+					KDFM:         req.KDF.M,
+					KDFT:         req.KDF.T,
+					KDFP:         req.KDF.P,
+					Initialized:  true,
+					CreatedAt:    time.Now(),
+					UpdatedAt:    time.Now(),
+				}
+				Success(c, http.StatusCreated, gin.H{
+					"verification_required": true,
+					"user":                  neutral,
+				})
+				return
+			}
 			Error(c, http.StatusConflict, "CONFLICT", "email already registered")
 			return
 		}
@@ -221,7 +281,7 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		at, _, err := GenerateTokenPair(userID, "", cfg)
+		at, err := GenerateAccessToken(userID, "", cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 			return
@@ -242,7 +302,7 @@ func respondVerificationRequired(c *gin.Context, db *gorm.DB, cfg *config.Config
 		Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create verification code")
 		return
 	}
-	sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom)
+	sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom, cfg.LogOtpFallback)
 	if err := sender.SendOtp(user.Email, otp); err != nil {
 		slog.Error("failed to send verification otp", "email", user.Email, "error", err)
 		Error(c, http.StatusServiceUnavailable, "EMAIL_DELIVERY_FAILED", "verification email could not be sent, please try again")
@@ -291,6 +351,10 @@ func HandleLogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid credentials")
 			return
 		}
+		if !consumeLoginNonce(db, req.Email, req.Nonce) {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid credentials")
+			return
+		}
 		verifierBytes, err := base64.RawStdEncoding.DecodeString(*user.AuthVerifier)
 		if err != nil {
 			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid credentials")
@@ -322,7 +386,7 @@ func HandleLogin(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		at, _, err := GenerateTokenPair(user.ID, req.DeviceID, cfg)
+		at, err := GenerateAccessToken(user.ID, req.DeviceID, cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 			return
@@ -383,7 +447,7 @@ func HandleRefresh(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		at, _, err := GenerateTokenPair(rt.UserID, rt.DeviceID, cfg)
+		at, err := GenerateAccessToken(rt.UserID, rt.DeviceID, cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 			return
@@ -465,6 +529,10 @@ func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid old nonce")
 			return
 		}
+		if !consumeLoginNonce(db, user.Email, req.OldNonce) {
+			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid old nonce")
+			return
+		}
 		verifierBytes, err := base64.RawStdEncoding.DecodeString(*user.AuthVerifier)
 		if err != nil {
 			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid stored verifier")
@@ -507,14 +575,25 @@ func HandlePasswordChange(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		if req.NewKDF.P != 0 {
 			user.KDFP = req.NewKDF.P
 		}
-		if err := db.Save(&user).Error; err != nil {
+		// Verifier/salts and the re-wrapped keyring must land together: a
+		// partial write would leave the account with a new password whose
+		// vault key is still wrapped with the old KEK (unrecoverable vault).
+		err = db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Save(&user).Error; err != nil {
+				return err
+			}
+			if req.NewEncryptedDEK != "" {
+				return upsertUserKey(tx, user.ID, "dek_wrapped_by_kek", req.NewEncryptedDEK)
+			}
+			return nil
+		})
+		if err != nil {
+			slog.Error("failed to update password", "error", err)
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to update user")
 			return
 		}
 
-		if req.NewEncryptedDEK != "" {
-			upsertUserKey(db, user.ID, "dek_wrapped_by_kek", req.NewEncryptedDEK)
-		}
+		clearLoginNonces(db, user.Email)
 
 		deviceID := c.GetString("device_id")
 		db.Model(&models.RefreshToken{}).
@@ -615,17 +694,30 @@ func HandleRecovery(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		if req.NewKDF.P != 0 {
 			user.KDFP = req.NewKDF.P
 		}
-		if err := db.Save(&user).Error; err != nil {
+		// Verifier/salts, recovery hash, and the re-wrapped keyring must land
+		// together; a partial write leaves the vault key wrapped with a key
+		// that no longer matches the stored verifier.
+		err = db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Save(&user).Error; err != nil {
+				return err
+			}
+			if req.NewEncryptedDEK != "" {
+				if err := upsertUserKey(tx, user.ID, "dek_wrapped_by_kek", req.NewEncryptedDEK); err != nil {
+					return err
+				}
+			}
+			if req.NewDekWrappedByRecovery != "" {
+				return upsertUserKey(tx, user.ID, "dek_wrapped_by_recovery", req.NewDekWrappedByRecovery)
+			}
+			return nil
+		})
+		if err != nil {
+			slog.Error("failed to update recovery", "error", err)
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to update user")
 			return
 		}
 
-		if req.NewEncryptedDEK != "" {
-			upsertUserKey(db, user.ID, "dek_wrapped_by_kek", req.NewEncryptedDEK)
-		}
-		if req.NewDekWrappedByRecovery != "" {
-			upsertUserKey(db, user.ID, "dek_wrapped_by_recovery", req.NewDekWrappedByRecovery)
-		}
+		clearLoginNonces(db, user.Email)
 
 		db.Model(&models.RefreshToken{}).
 			Where("user_id = ? AND revoked_at IS NULL", user.ID).
@@ -787,7 +879,11 @@ func HandleRecoveryPrefetch(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		nonce := randBytes(32)
+		nonce, err := randBytes(32)
+		if err != nil {
+			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate nonce")
+			return
+		}
 		Success(c, http.StatusOK, gin.H{
 			"nonce": nonce,
 			"email": user.Email,
@@ -822,7 +918,10 @@ func HandleMe(db *gorm.DB) gin.HandlerFunc {
 }
 
 func createRefreshToken(db *gorm.DB, userID uuid.UUID, deviceID string, cfg *config.Config) (string, error) {
-	rawToken := randBytes(48)
+	rawToken, err := randBytes(48)
+	if err != nil {
+		return "", err
+	}
 	tokenHash := hashToken(rawToken)
 
 	now := time.Now()
@@ -848,11 +947,11 @@ func HandleVerifyEmail(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 
 		var user models.User
 		if db.Where("email = ?", req.Email).First(&user).Error != nil {
-			Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid email")
+			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "invalid verification code")
 			return
 		}
 		if user.EmailVerifiedAt != nil {
-			Error(c, http.StatusBadRequest, "ALREADY_VERIFIED", "email already verified")
+			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "invalid verification code")
 			return
 		}
 
@@ -896,7 +995,7 @@ func HandleVerifyEmail(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create refresh token")
 			return
 		}
-		at, _, err := GenerateTokenPair(user.ID, req.DeviceID, cfg)
+		at, err := GenerateAccessToken(user.ID, req.DeviceID, cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 			return
@@ -939,7 +1038,7 @@ func HandleResendVerification(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create verification code")
 			return
 		}
-		sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom)
+		sender := email.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom, cfg.LogOtpFallback)
 		if err := sender.SendOtp(user.Email, otp); err != nil {
 			slog.Error("failed to send verification otp", "email", user.Email, "error", err)
 			Error(c, http.StatusServiceUnavailable, "EMAIL_DELIVERY_FAILED", "verification email could not be sent, please try again")
@@ -955,6 +1054,45 @@ func hashToken(token string) string {
 	return base64.RawStdEncoding.EncodeToString(h[:])
 }
 
+const loginNonceTTL = 5 * time.Minute
+
+// storeLoginNonce persists the prelogin challenge so a login proof can only
+// be bound to a nonce the server actually issued (never a captured pair
+// replayed against a fresh nonce or swapped to another user).
+func storeLoginNonce(db *gorm.DB, email, nonce string) {
+	// Clear stale rows for this email on issue (expired or already used).
+	db.Where("email = ? AND (expires_at < ? OR used_at IS NOT NULL)", email, time.Now()).
+		Delete(&models.LoginNonce{})
+	db.Create(&models.LoginNonce{
+		Email:     email,
+		NonceHash: hashToken(nonce),
+		ExpiresAt: time.Now().Add(loginNonceTTL),
+	})
+}
+
+// consumeLoginNonce atomically checks a nonce was issued for this email, is
+// still fresh and unused, then marks it used (single-use). Returns false on
+// replay, expiry, or if the nonce was never issued.
+func consumeLoginNonce(db *gorm.DB, email, nonce string) bool {
+	var nonceRow models.LoginNonce
+	err := db.Where("email = ? AND nonce_hash = ?", email, hashToken(nonce)).First(&nonceRow).Error
+	if err != nil {
+		return false
+	}
+	if nonceRow.UsedAt != nil || time.Now().After(nonceRow.ExpiresAt) {
+		return false
+	}
+	now := time.Now()
+	db.Model(&nonceRow).Update("used_at", &now)
+	return true
+}
+
+// clearLoginNonces invalidates every outstanding nonce for an account after
+// its verifier changes (password change, OAuth setup, recovery).
+func clearLoginNonces(db *gorm.DB, email string) {
+	db.Where("email = ?", email).Delete(&models.LoginNonce{})
+}
+
 func deref(s *string) string {
 	if s == nil {
 		return ""
@@ -962,14 +1100,10 @@ func deref(s *string) string {
 	return *s
 }
 
-func randBytes(n int) string {
+func randBytes(n int) (string, error) {
 	b := make([]byte, n)
-	rand.Read(b)
-	return base64.RawStdEncoding.EncodeToString(b)
-}
-
-func randHex(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	return base64.RawStdEncoding.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("crypto/rand read: %w", err)
+	}
+	return base64.RawStdEncoding.EncodeToString(b), nil
 }

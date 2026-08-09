@@ -98,6 +98,11 @@ func getLimiter(max int) *rateLimiter {
 func RateLimit(max int) gin.HandlerFunc {
 	limiter := getLimiter(max)
 	return func(c *gin.Context) {
+		if c.Request.Method == http.MethodOptions {
+			c.Next()
+			return
+		}
+
 		ip := c.ClientIP()
 		now := time.Now()
 		window := time.Minute
@@ -131,11 +136,30 @@ func RateLimit(max int) gin.HandlerFunc {
 	}
 }
 
-func CORS() gin.HandlerFunc {
+func CORS(allowedOrigins []string) gin.HandlerFunc {
+	allowed := make(map[string]struct{}, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		o = strings.TrimSuffix(o, "/")
+		allowed[o] = struct{}{}
+	}
+
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
 		if origin == "" {
-			origin = "*"
+			c.Next()
+			return
+		}
+		origin = strings.TrimSuffix(origin, "/")
+
+		if _, ok := allowed[origin]; !ok {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": gin.H{
+					"code":       "CORS_ORIGIN_NOT_ALLOWED",
+					"message":    "origin not allowed",
+					"request_id": c.GetString("request_id"),
+				},
+			})
+			return
 		}
 
 		c.Header("Access-Control-Allow-Origin", origin)

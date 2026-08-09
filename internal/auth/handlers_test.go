@@ -66,6 +66,8 @@ func testConfig() *config.Config {
 func testConfigWithVerification() *config.Config {
 	cfg := testConfig()
 	cfg.RequireEmailVerification = true
+	// tests have no SMTP; log the OTP like a dev server would
+	cfg.LogOtpFallback = true
 	return cfg
 }
 
@@ -125,6 +127,17 @@ func seedUnverifiedUser(t *testing.T, db *gorm.DB, email string) (uuid.UUID, str
 	return userID, otp
 }
 
+func seedLoginNonce(t *testing.T, db *gorm.DB, email, nonceB64 string) {
+	t.Helper()
+	if err := db.Create(&models.LoginNonce{
+		Email:     email,
+		NonceHash: hashToken(nonceB64),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}).Error; err != nil {
+		t.Fatalf("seed login nonce: %v", err)
+	}
+}
+
 func makeVerifyEmailRequest(email, otp string) *http.Request {
 	raw, _ := json.Marshal(map[string]string{"email": email, "otp": otp, "device_id": "dev-1"})
 	req := httptest.NewRequest("POST", "/api/v1/auth/verify-email", bytes.NewReader(raw))
@@ -133,7 +146,7 @@ func makeVerifyEmailRequest(email, otp string) *http.Request {
 }
 
 func makeAccessToken(userID uuid.UUID, cfg *config.Config) string {
-	at, _, err := GenerateTokenPair(userID, "", cfg)
+	at, err := GenerateAccessToken(userID, "", cfg)
 	if err != nil {
 		panic("makeAccessToken: " + err.Error())
 	}
@@ -141,7 +154,7 @@ func makeAccessToken(userID uuid.UUID, cfg *config.Config) string {
 }
 
 func makeAccessTokenForDevice(userID uuid.UUID, deviceID string, cfg *config.Config) string {
-	at, _, err := GenerateTokenPair(userID, deviceID, cfg)
+	at, err := GenerateAccessToken(userID, deviceID, cfg)
 	if err != nil {
 		panic("makeAccessTokenForDevice: " + err.Error())
 	}
@@ -399,6 +412,93 @@ func TestRegister_ExistingEmail(t *testing.T) {
 	}
 }
 
+func TestRegister_ExistingEmail_VerificationOn_Uniform(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfigWithVerification()
+
+	storedID := uuid.New()
+	salt := "existing-salt"
+	saltCL := "existing-salt-cl"
+	existing := models.User{
+		ID:           storedID,
+		Email:        "taken2@example.com",
+		FullName:     "Stored Full Name",
+		AuthProvider: "password",
+		AuthSalt:     &salt,
+		SaltCL:       &saltCL,
+		KDFM:         67108864,
+		KDFT:         3,
+		KDFP:         1,
+		CreatedAt:    time.Now().Add(-24 * time.Hour),
+	}
+	if err := db.Create(&existing).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	var usersBefore int64
+	db.Model(&models.User{}).Count(&usersBefore)
+
+	r := setupHandlerRouter(db, cfg)
+
+	body, _ := json.Marshal(gin.H{
+		"user_id":       uuid.New().String(),
+		"email":         "taken2@example.com",
+		"full_name":     "Probe Name",
+		"password_hash": "base64-verifier",
+		"kdf":           map[string]int{"m": 32768, "t": 2, "p": 1},
+		"server_salt":   "probe-server-salt",
+		"salt_cl":       "probe-salt-cl",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			VerificationRequired bool `json:"verification_required"`
+			User                 struct {
+				ID        string `json:"id"`
+				Email     string `json:"email"`
+				FullName  string `json:"full_name"`
+				KDFM      int    `json:"kdf_m"`
+				KDFT      int    `json:"kdf_t"`
+				KDFP      int    `json:"kdf_p"`
+				CreatedAt string `json:"created_at"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Data.VerificationRequired {
+		t.Fatal("expected verification_required true")
+	}
+	if resp.Data.User.ID == storedID.String() {
+		t.Fatal("response leaked the stored user id")
+	}
+	if resp.Data.User.FullName != "Probe Name" {
+		t.Fatalf("user.full_name must come from request, got %q", resp.Data.User.FullName)
+	}
+	if resp.Data.User.KDFM != 32768 || resp.Data.User.KDFT != 2 || resp.Data.User.KDFP != 1 {
+		t.Fatalf("kdf must come from request, got %d/%d/%d", resp.Data.User.KDFM, resp.Data.User.KDFT, resp.Data.User.KDFP)
+	}
+
+	// no rows created, no OTP issued to the real owner
+	var usersAfter int64
+	db.Model(&models.User{}).Count(&usersAfter)
+	if usersAfter != usersBefore {
+		t.Fatalf("expected no new user row, before=%d after=%d", usersBefore, usersAfter)
+	}
+	var codeCount int64
+	db.Model(&models.AuthCode{}).Where("user_id = ? AND purpose = ?", storedID, emailVerifyPurpose).Count(&codeCount)
+	if codeCount != 0 {
+		t.Fatalf("expected no verification code issued for existing account, got %d", codeCount)
+	}
+}
+
 func TestRegister_Idempotent(t *testing.T) {
 	db := setupTestDB(t)
 	cfg := testConfig()
@@ -406,11 +506,13 @@ func TestRegister_Idempotent(t *testing.T) {
 	userID := uuid.New()
 	salt := "server-salt"
 	saltCL := "client-salt"
+	verifier := "base64-verifier"
 	existing := models.User{
 		ID:           userID,
 		Email:        "idempotent@example.com",
 		FullName:     "Existing",
 		AuthProvider: "password",
+		AuthVerifier: &verifier,
 		AuthSalt:     &salt,
 		SaltCL:       &saltCL,
 	}
@@ -444,6 +546,88 @@ func TestRegister_Idempotent(t *testing.T) {
 	data := resp["data"].(map[string]interface{})
 	if data["access_token"] == nil || data["access_token"] == "" {
 		t.Error("access_token should not be empty")
+	}
+}
+
+func TestRegister_Idempotent_WrongVerifier_Rejected(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+
+	userID := uuid.New()
+	salt := "server-salt"
+	saltCL := "client-salt"
+	verifier := "correct-verifier"
+	existing := models.User{
+		ID:           userID,
+		Email:        "idem-attack@example.com",
+		FullName:     "Existing",
+		AuthProvider: "password",
+		AuthVerifier: &verifier,
+		AuthSalt:     &salt,
+		SaltCL:       &saltCL,
+	}
+	if err := db.Create(&existing).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	r := setupHandlerRouter(db, cfg)
+
+	body, _ := json.Marshal(gin.H{
+		"user_id":       userID.String(),
+		"email":         "idem-attack@example.com",
+		"password_hash": "attacker-guessed-verifier",
+		"kdf":           map[string]int{"m": 67108864, "t": 3, "p": 1},
+		"server_salt":   "new-server-salt",
+		"salt_cl":       "new-client-salt",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegister_Idempotent_WrongEmail_Rejected(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+
+	userID := uuid.New()
+	salt := "server-salt"
+	saltCL := "client-salt"
+	verifier := "correct-verifier"
+	existing := models.User{
+		ID:           userID,
+		Email:        "victim@example.com",
+		FullName:     "Existing",
+		AuthProvider: "password",
+		AuthVerifier: &verifier,
+		AuthSalt:     &salt,
+		SaltCL:       &saltCL,
+	}
+	if err := db.Create(&existing).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	r := setupHandlerRouter(db, cfg)
+
+	body, _ := json.Marshal(gin.H{
+		"user_id":       userID.String(),
+		"email":         "attacker@example.com",
+		"password_hash": "correct-verifier",
+		"kdf":           map[string]int{"m": 67108864, "t": 3, "p": 1},
+		"server_salt":   "new-server-salt",
+		"salt_cl":       "new-client-salt",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -679,8 +863,18 @@ func TestVerifyEmail_UnknownEmail(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, makeVerifyEmailRequest("nobody@example.com", "123456"))
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error.Code != "INVALID_VERIFICATION_CODE" {
+		t.Fatalf("expected INVALID_VERIFICATION_CODE, got %s", resp.Error.Code)
 	}
 }
 
@@ -702,8 +896,27 @@ func TestVerifyEmail_AlreadyVerified(t *testing.T) {
 		} `json:"error"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp.Error.Code != "ALREADY_VERIFIED" {
-		t.Fatalf("expected ALREADY_VERIFIED, got %s", resp.Error.Code)
+	if resp.Error.Code != "INVALID_VERIFICATION_CODE" {
+		t.Fatalf("expected INVALID_VERIFICATION_CODE, got %s", resp.Error.Code)
+	}
+}
+
+func TestVerifyEmail_UnknownAndWrongCode_Identical(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupHandlerRouter(db, testConfigWithVerification())
+	_, _ = seedUnverifiedUser(t, db, "probe@example.com")
+
+	wrong := httptest.NewRecorder()
+	r.ServeHTTP(wrong, makeVerifyEmailRequest("probe@example.com", "999999"))
+
+	unknown := httptest.NewRecorder()
+	r.ServeHTTP(unknown, makeVerifyEmailRequest("ghost@example.com", "999999"))
+
+	if wrong.Code != http.StatusBadRequest || unknown.Code != http.StatusBadRequest {
+		t.Fatalf("statuses must match: wrong=%d unknown=%d", wrong.Code, unknown.Code)
+	}
+	if wrong.Body.String() != unknown.Body.String() {
+		t.Fatalf("bodies must be identical:\n wrong:  %s\n unknown: %s", wrong.Body.String(), unknown.Body.String())
 	}
 }
 
@@ -715,11 +928,13 @@ func TestRegister_VerifiedUser_ReturnsTokens(t *testing.T) {
 	now := time.Now()
 	salt := "server-salt"
 	saltCL := "client-salt"
+	verifier := base64.RawStdEncoding.EncodeToString([]byte("verifier-bytes"))
 	existing := models.User{
 		ID:              userID,
 		Email:           "verified@example.com",
 		FullName:        "Verified",
 		AuthProvider:    "password",
+		AuthVerifier:    &verifier,
 		AuthSalt:        &salt,
 		SaltCL:          &saltCL,
 		EmailVerifiedAt: &now,
@@ -914,6 +1129,7 @@ func TestLogin_CorrectProof(t *testing.T) {
 	_, verifier := seedUserWithVerifier(t, db, "alice@example.com")
 	nonce := []byte("test-nonce-for-login")
 	proof := GenerateProof(verifier, nonce)
+	seedLoginNonce(t, db, "alice@example.com", base64.RawStdEncoding.EncodeToString(nonce))
 
 	body, _ := json.Marshal(gin.H{
 		"email":     "alice@example.com",
@@ -959,6 +1175,7 @@ func TestLogin_WrongProof(t *testing.T) {
 	seedUserWithVerifier(t, db, "alice@example.com")
 	wrongProof := []byte("wrong-proof-data")
 	nonce := []byte("test-nonce")
+	seedLoginNonce(t, db, "alice@example.com", base64.RawStdEncoding.EncodeToString(nonce))
 
 	body, _ := json.Marshal(gin.H{
 		"email": "alice@example.com",
@@ -992,6 +1209,194 @@ func TestLogin_NonExistentEmail(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+	t.Log("ok")
+}
+
+func TestLogin_ReplayNonce_Rejected(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	_, verifier := seedUserWithVerifier(t, db, "alice@example.com")
+	nonce := []byte("replay-nonce")
+	proof := GenerateProof(verifier, nonce)
+	nonceB64 := base64.RawStdEncoding.EncodeToString(nonce)
+	seedLoginNonce(t, db, "alice@example.com", nonceB64)
+
+	login := func() *httptest.ResponseRecorder {
+		body, _ := json.Marshal(gin.H{
+			"email": "alice@example.com",
+			"proof": base64.RawStdEncoding.EncodeToString(proof),
+			"nonce": nonceB64,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	first := login()
+	if first.Code != http.StatusOK {
+		t.Fatalf("first login: expected 200, got %d: %s", first.Code, first.Body.String())
+	}
+
+	second := login()
+	if second.Code != http.StatusUnauthorized {
+		t.Fatalf("replay: expected 401, got %d: %s", second.Code, second.Body.String())
+	}
+}
+
+func TestLogin_NonceNeverIssued_Rejected(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	_, verifier := seedUserWithVerifier(t, db, "bob@example.com")
+	nonce := []byte("never-issued-nonce")
+	proof := GenerateProof(verifier, nonce)
+
+	body, _ := json.Marshal(gin.H{
+		"email": "bob@example.com",
+		"proof": base64.RawStdEncoding.EncodeToString(proof),
+		"nonce": base64.RawStdEncoding.EncodeToString(nonce),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 (nonce never issued), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestLogin_NonceForOtherEmail_Rejected(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	_, verifier := seedUserWithVerifier(t, db, "victim@example.com")
+	_, _ = seedUserWithVerifier(t, db, "attacker@example.com")
+	nonce := []byte("cross-email-nonce")
+	nonceB64 := base64.RawStdEncoding.EncodeToString(nonce)
+	seedLoginNonce(t, db, "attacker@example.com", nonceB64)
+
+	// victim sends attacker-issued nonce: must be rejected even with a valid proof
+	proof := GenerateProof(verifier, nonce)
+	body, _ := json.Marshal(gin.H{
+		"email": "victim@example.com",
+		"proof": base64.RawStdEncoding.EncodeToString(proof),
+		"nonce": nonceB64,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 (nonce issued for another email), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestLogin_ExpiredNonce_Rejected(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	_, verifier := seedUserWithVerifier(t, db, "tardy@example.com")
+	nonce := []byte("expired-nonce")
+	nonceB64 := base64.RawStdEncoding.EncodeToString(nonce)
+	if err := db.Create(&models.LoginNonce{
+		Email:     "tardy@example.com",
+		NonceHash: hashToken(nonceB64),
+		ExpiresAt: time.Now().Add(-time.Minute),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	proof := GenerateProof(verifier, nonce)
+	body, _ := json.Marshal(gin.H{
+		"email": "tardy@example.com",
+		"proof": base64.RawStdEncoding.EncodeToString(proof),
+		"nonce": nonceB64,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 (expired nonce), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPrelogin_StoresNonce(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	seedUserWithVerifier(t, db, "stored@example.com")
+
+	body, _ := json.Marshal(gin.H{"email": "stored@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/prelogin", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	nonce, _ := resp["data"].(map[string]interface{})["nonce"].(string)
+
+	var nonceRow models.LoginNonce
+	if err := db.Where("email = ? AND nonce_hash = ?", "stored@example.com", hashToken(nonce)).First(&nonceRow).Error; err != nil {
+		t.Fatalf("expected stored login nonce, got: %v", err)
+	}
+	if nonceRow.UsedAt != nil {
+		t.Fatal("fresh nonce must not be marked used")
+	}
+	if time.Now().After(nonceRow.ExpiresAt) {
+		t.Fatal("fresh nonce must not be expired")
+	}
+}
+
+func TestPasswordChange_ClearsNonces(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, verifier := seedUserWithVerifier(t, db, "clear@example.com")
+	token := makeAccessToken(uid, cfg)
+
+	nonce := []byte("clear-nonce")
+	proof := GenerateProof(verifier, nonce)
+	nonceB64 := base64.RawStdEncoding.EncodeToString(nonce)
+	seedLoginNonce(t, db, "clear@example.com", nonceB64)
+
+	body, _ := json.Marshal(gin.H{
+		"old_proof":    base64.RawStdEncoding.EncodeToString(proof),
+		"old_nonce":    nonceB64,
+		"new_verifier": "fresh-verifier",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password-change", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var count int64
+	db.Model(&models.LoginNonce{}).Where("email = ?", "clear@example.com").Count(&count)
+	if count != 0 {
+		t.Fatalf("expected all nonces cleared after password change, got %d", count)
 	}
 }
 
@@ -1263,6 +1668,7 @@ func TestPasswordChange_ValidOldProof(t *testing.T) {
 
 	nonce := []byte("old-nonce-for-pwchange")
 	proof := GenerateProof(verifier, nonce)
+	seedLoginNonce(t, db, "pwchange@example.com", base64.RawStdEncoding.EncodeToString(nonce))
 
 	body, _ := json.Marshal(gin.H{
 		"old_proof":       base64.RawStdEncoding.EncodeToString(proof),
@@ -1304,6 +1710,52 @@ func TestPasswordChange_ValidOldProof(t *testing.T) {
 	}
 }
 
+func TestPasswordChange_KeyringFailure_RollsBackUserUpdate(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+
+	uid, verifier := seedUserWithVerifier(t, db, "pwchange-rollback@example.com")
+	db.Create(&models.UserKey{UserID: uid, KeyType: "dek_wrapped_by_kek", Payload: "wrapped-old"})
+	token := makeAccessToken(uid, cfg)
+
+	// Simulate a crash mid-transaction: any keyring write with this payload
+	// fails. If the handler is atomic, the user row must roll back with it.
+	db.Exec("CREATE TRIGGER boom_payload BEFORE UPDATE OF payload ON user_keys " +
+		"WHEN NEW.payload = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END")
+
+	nonce := []byte("rollback-nonce")
+	proof := GenerateProof(verifier, nonce)
+	seedLoginNonce(t, db, "pwchange-rollback@example.com", base64.RawStdEncoding.EncodeToString(nonce))
+
+	body, _ := json.Marshal(gin.H{
+		"old_proof":         base64.RawStdEncoding.EncodeToString(proof),
+		"old_nonce":         base64.RawStdEncoding.EncodeToString(nonce),
+		"new_verifier":      "new-verifier-value",
+		"new_encrypted_dek": "boom",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password-change", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on keyring failure, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var user models.User
+	db.Where("id = ?", uid).First(&user)
+	if user.AuthVerifier == nil || *user.AuthVerifier != base64.RawStdEncoding.EncodeToString(verifier) {
+		t.Fatalf("verifier must be rolled back, got %v", user.AuthVerifier)
+	}
+	var uk models.UserKey
+	db.Where("user_id = ? AND key_type = ?", uid, "dek_wrapped_by_kek").First(&uk)
+	if uk.Payload != "wrapped-old" {
+		t.Fatalf("keyring payload must be rolled back, got %q", uk.Payload)
+	}
+}
+
 func TestPasswordChange_WrongOldProof(t *testing.T) {
 	db := setupTestDB(t)
 	cfg := testConfig()
@@ -1314,6 +1766,7 @@ func TestPasswordChange_WrongOldProof(t *testing.T) {
 
 	wrongProof := []byte("completely-wrong-proof")
 	nonce := []byte("some-nonce")
+	seedLoginNonce(t, db, "pwchange-wrong@example.com", base64.RawStdEncoding.EncodeToString(nonce))
 
 	body, _ := json.Marshal(gin.H{
 		"old_proof":    base64.RawStdEncoding.EncodeToString(wrongProof),
@@ -1344,6 +1797,7 @@ func TestPasswordChange_RevokesOtherSessions(t *testing.T) {
 	token := makeAccessTokenForDevice(uid, "device-1", cfg)
 	nonce := []byte("revoke-nonce")
 	proof := GenerateProof(verifier, nonce)
+	seedLoginNonce(t, db, "pwchange-revoke@example.com", base64.RawStdEncoding.EncodeToString(nonce))
 
 	body, _ := json.Marshal(gin.H{
 		"old_proof":    base64.RawStdEncoding.EncodeToString(proof),
@@ -1626,6 +2080,7 @@ func TestLogin_Unverified_ReturnsVerificationRequired(t *testing.T) {
 	nonce := []byte("nonce-bytes")
 	nonceB64 := base64.RawStdEncoding.EncodeToString(nonce)
 	proof := base64.RawStdEncoding.EncodeToString(GenerateProof(verifier, nonce))
+	seedLoginNonce(t, db, "gate@example.com", nonceB64)
 
 	raw, _ := json.Marshal(map[string]string{
 		"email": "gate@example.com", "proof": proof, "nonce": nonceB64,
@@ -1675,6 +2130,7 @@ func TestLogin_Verified_Succeeds(t *testing.T) {
 
 	nonce := []byte("nonce-bytes")
 	proof := base64.RawStdEncoding.EncodeToString(GenerateProof(verifier, nonce))
+	seedLoginNonce(t, db, "ok@example.com", base64.RawStdEncoding.EncodeToString(nonce))
 	raw, _ := json.Marshal(map[string]string{
 		"email": "ok@example.com",
 		"proof": proof,
@@ -1946,6 +2402,7 @@ func TestPasswordChange_WeakKDF_Rejected(t *testing.T) {
 
 	nonce := []byte("nonce-for-weak-kdf")
 	proof := GenerateProof(verifier, nonce)
+	seedLoginNonce(t, db, "pwchange-weak-kdf@example.com", base64.RawStdEncoding.EncodeToString(nonce))
 
 	body, _ := json.Marshal(gin.H{
 		"old_proof":    base64.RawStdEncoding.EncodeToString(proof),
