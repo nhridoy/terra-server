@@ -165,6 +165,80 @@ func TestOAuthStart_UnknownProvider(t *testing.T) {
 	}
 }
 
+func TestOAuthStart_UnconfiguredProvider(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := oauthTestConfig()
+	cfg.OAuthGoogleID = ""
+	cfg.OAuthGoogleSecret = ""
+	r := oauthRouter(db, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/start/google", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !contains(w.Body.String(), "PROVIDER_NOT_CONFIGURED") {
+		t.Errorf("expected PROVIDER_NOT_CONFIGURED code, got: %s", w.Body.String())
+	}
+	if !contains(w.Body.String(), "not configured") {
+		t.Errorf("expected 'not configured' message, got: %s", w.Body.String())
+	}
+}
+
+func TestOAuthStart_UnconfiguredGitHub(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := oauthTestConfig()
+	cfg.OAuthGitHubID = ""
+	cfg.OAuthGitHubSecret = ""
+	r := oauthRouter(db, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/start/github", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !contains(w.Body.String(), "PROVIDER_NOT_CONFIGURED") {
+		t.Errorf("expected PROVIDER_NOT_CONFIGURED code, got: %s", w.Body.String())
+	}
+}
+
+func TestOAuthCallback_ProviderError_RedirectsToClient(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := oauthTestConfig()
+	r := oauthRouter(db, cfg)
+
+	seedOAuthState(t, db, "err-state", "google", "verifier", "dev1", time.Now().Add(10*time.Minute), nil, "http://127.0.0.1:1421/oauth/callback")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/callback/google?error=access_denied&state=err-state", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+
+	location := w.Header().Get("Location")
+	if !contains(location, "http://127.0.0.1:1421/oauth/callback") {
+		t.Errorf("expected redirect to stored app callback, got: %s", location)
+	}
+	if !contains(location, "dest=error") {
+		t.Errorf("expected dest=error, got: %s", location)
+	}
+	if !contains(location, "access_denied") {
+		t.Errorf("expected provider error message, got: %s", location)
+	}
+
+	var os models.OAuthState
+	db.Where("state = ?", "err-state").First(&os)
+	if os.UsedAt == nil {
+		t.Error("state should be marked used after provider error")
+	}
+}
+
 func TestOAuthStart_StoresDeviceID(t *testing.T) {
 	db := setupTestDB(t)
 	cfg := oauthTestConfig()

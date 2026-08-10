@@ -148,72 +148,11 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		var existing models.User
-		if db.Where("id = ?", userID).First(&existing).Error == nil {
-			// Idempotent retry guard: never mint tokens (or reissue a
-			// verification) for an existing account based on user_id alone.
-			// The caller must prove it knows the account's email and verifier,
-			// otherwise anyone who learns a leaked UUID could take over the
-			// session. A genuine retry re-sends the same verifier.
-			if existing.Email != req.Email || existing.AuthVerifier == nil ||
-				!ConstantTimeCompare([]byte(*existing.AuthVerifier), []byte(req.PasswordHash)) {
-				Error(c, http.StatusConflict, "CONFLICT", "email already registered")
-				return
-			}
-			if cfg.RequireEmailVerification &&
-				existing.AuthProvider == "password" && existing.EmailVerifiedAt == nil {
-				respondVerificationRequired(c, db, cfg, &existing)
-				return
-			}
-			rt, err := createRefreshToken(db, userID, "", cfg)
-			if err != nil {
-				Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create refresh token")
-				return
-			}
-			at, err := GenerateAccessToken(userID, "", cfg)
-			if err != nil {
-				Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
-				return
-			}
-			Success(c, http.StatusOK, gin.H{
-				"access_token":  at,
-				"refresh_token": rt,
-				"user":          existing,
-				"keyring":       fetchKeyring(db, existing.ID),
-			})
-			return
-		}
-
-		if db.Where("email = ?", req.Email).First(&existing).Error == nil {
-			if cfg.RequireEmailVerification {
-				// Uniform with a fresh registration: same status and body
-				// shape, with a user object built from the request (never the
-				// stored row) so an existing account is indistinguishable from
-				// a new signup. No OTP is issued here, so probing cannot spam
-				// the real owner's mailbox; a legit user whose account already
-				// exists can re-enter via login, which surfaces
-				// VERIFICATION_REQUIRED with a resend path.
-				fullName := req.FullName
-				if fullName == "" {
-					fullName = req.Email
-				}
-				neutral := models.User{
-					ID:           uuid.New(),
-					Email:        req.Email,
-					FullName:     fullName,
-					AuthProvider: "password",
-					KDFM:         req.KDF.M,
-					KDFT:         req.KDF.T,
-					KDFP:         req.KDF.P,
-					Initialized:  true,
-					CreatedAt:    time.Now(),
-					UpdatedAt:    time.Now(),
-				}
-				Success(c, http.StatusCreated, gin.H{
-					"verification_required": true,
-					"user":                  neutral,
-				})
-				return
-			}
+		if db.Where("id = ?", userID).First(&existing).Error == nil ||
+			db.Where("email = ?", req.Email).First(&existing).Error == nil {
+			// A user_id or email that already exists (verified or not, with the
+			// same password or a different one) is always a conflict. The
+			// account already exists and re-registration must not proceed.
 			Error(c, http.StatusConflict, "CONFLICT", "email already registered")
 			return
 		}
@@ -879,6 +818,9 @@ func HandleRecoveryPrefetch(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
+		var pk models.UserKey
+		db.Where("user_id = ? AND key_type = ?", user.ID, "private_key_wrapped_by_dek").First(&pk)
+
 		nonce, err := randBytes(32)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate nonce")
@@ -892,9 +834,10 @@ func HandleRecoveryPrefetch(db *gorm.DB) gin.HandlerFunc {
 				"t": user.KDFT,
 				"p": user.KDFP,
 			},
-			"server_salt":             deref(user.AuthSalt),
-			"salt_cl":                 deref(user.SaltCL),
-			"dek_wrapped_by_recovery": uk.Payload,
+			"server_salt":                 deref(user.AuthSalt),
+			"salt_cl":                     deref(user.SaltCL),
+			"dek_wrapped_by_recovery":     uk.Payload,
+			"private_key_wrapped_by_dek":  pk.Payload,
 		})
 	}
 }
@@ -947,17 +890,17 @@ func HandleVerifyEmail(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 
 		var user models.User
 		if db.Where("email = ?", req.Email).First(&user).Error != nil {
-			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "invalid verification code")
+			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "verification code expired or invalid")
 			return
 		}
 		if user.EmailVerifiedAt != nil {
-			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "invalid verification code")
+			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "verification code expired or invalid")
 			return
 		}
 
 		code, err := findEmailVerifyCode(db, user.ID)
 		if err != nil || code.ExpiresAt.Before(time.Now()) {
-			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "verification code expired or missing")
+			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "verification code expired or invalid")
 			return
 		}
 
@@ -971,7 +914,7 @@ func HandleVerifyEmail(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 				return
 			}
 			db.Save(&code)
-			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "invalid verification code")
+			Error(c, http.StatusBadRequest, "INVALID_VERIFICATION_CODE", "verification code expired or invalid")
 			return
 		}
 

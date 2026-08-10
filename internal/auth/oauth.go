@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -35,6 +36,9 @@ func generatePKCE() (verifier string, challenge string, err error) {
 func getOAuthConfig(provider string, cfg *config.Config) (*oauth2.Config, error) {
 	switch provider {
 	case "google":
+		if cfg.OAuthGoogleID == "" || cfg.OAuthGoogleSecret == "" {
+			return nil, fmt.Errorf("google oauth is not configured on this server")
+		}
 		return &oauth2.Config{
 			ClientID:     cfg.OAuthGoogleID,
 			ClientSecret: cfg.OAuthGoogleSecret,
@@ -43,6 +47,9 @@ func getOAuthConfig(provider string, cfg *config.Config) (*oauth2.Config, error)
 			Scopes:       []string{"openid", "email", "profile"},
 		}, nil
 	case "github":
+		if cfg.OAuthGitHubID == "" || cfg.OAuthGitHubSecret == "" {
+			return nil, fmt.Errorf("github oauth is not configured on this server")
+		}
 		return &oauth2.Config{
 			ClientID:     cfg.OAuthGitHubID,
 			ClientSecret: cfg.OAuthGitHubSecret,
@@ -279,6 +286,10 @@ func HandleOAuthStart(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		provider := c.Param("provider")
 		oauthCfg, err := getOAuthConfig(provider, cfg)
 		if err != nil {
+			if strings.Contains(err.Error(), "not configured") {
+				Error(c, http.StatusBadRequest, "PROVIDER_NOT_CONFIGURED", err.Error())
+				return
+			}
 			Error(c, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported OAuth provider")
 			return
 		}
@@ -338,13 +349,38 @@ func HandleOAuthCallback(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 		code := c.Query("code")
 		state := c.Query("state")
 
-		if code == "" || state == "" {
+		var oauthState models.OAuthState
+		stateFound := false
+		if state != "" {
+			stateFound = db.Where("state = ?", state).First(&oauthState).Error == nil
+		}
+
+		// Provider-side error or a malformed callback (e.g. the user pressed
+		// Cancel on the consent page and the provider redirected with
+		// error=access_denied). When the state row is known it is routed back
+		// to the waiting client — the loopback listener — so the app shows the
+		// failure immediately instead of hanging until the timeout.
+		if code == "" {
+			message := "provider_error"
+			if providerErr := c.Query("error"); providerErr != "" {
+				message = providerErr
+			}
+			if stateFound {
+				now := time.Now()
+				db.Model(&oauthState).Update("used_at", &now)
+				c.Redirect(http.StatusFound, oauthTargetURL(&oauthState, cfg, "error", url.Values{"message": []string{message}}))
+			} else {
+				c.Redirect(http.StatusFound, oauthTargetURL(nil, cfg, "error", url.Values{"message": []string{"missing_code_or_state"}}))
+			}
+			return
+		}
+
+		if state == "" {
 			c.Redirect(http.StatusFound, oauthTargetURL(nil, cfg, "error", url.Values{"message": []string{"missing_code_or_state"}}))
 			return
 		}
 
-		var oauthState models.OAuthState
-		if db.Where("state = ?", state).First(&oauthState).Error != nil {
+		if !stateFound {
 			c.Redirect(http.StatusFound, oauthTargetURL(nil, cfg, "error", url.Values{"message": []string{"invalid_state"}}))
 			return
 		}

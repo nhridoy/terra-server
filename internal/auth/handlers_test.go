@@ -453,37 +453,8 @@ func TestRegister_ExistingEmail_VerificationOn_Uniform(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-	var resp struct {
-		Data struct {
-			VerificationRequired bool `json:"verification_required"`
-			User                 struct {
-				ID        string `json:"id"`
-				Email     string `json:"email"`
-				FullName  string `json:"full_name"`
-				KDFM      int    `json:"kdf_m"`
-				KDFT      int    `json:"kdf_t"`
-				KDFP      int    `json:"kdf_p"`
-				CreatedAt string `json:"created_at"`
-			} `json:"user"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatal(err)
-	}
-	if !resp.Data.VerificationRequired {
-		t.Fatal("expected verification_required true")
-	}
-	if resp.Data.User.ID == storedID.String() {
-		t.Fatal("response leaked the stored user id")
-	}
-	if resp.Data.User.FullName != "Probe Name" {
-		t.Fatalf("user.full_name must come from request, got %q", resp.Data.User.FullName)
-	}
-	if resp.Data.User.KDFM != 32768 || resp.Data.User.KDFT != 2 || resp.Data.User.KDFP != 1 {
-		t.Fatalf("kdf must come from request, got %d/%d/%d", resp.Data.User.KDFM, resp.Data.User.KDFT, resp.Data.User.KDFP)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
 	}
 
 	// no rows created, no OTP issued to the real owner
@@ -499,7 +470,7 @@ func TestRegister_ExistingEmail_VerificationOn_Uniform(t *testing.T) {
 	}
 }
 
-func TestRegister_Idempotent(t *testing.T) {
+func TestRegister_DuplicateSamePayload_Rejected(t *testing.T) {
 	db := setupTestDB(t)
 	cfg := testConfig()
 
@@ -535,17 +506,8 @@ func TestRegister_Idempotent(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 for idempotent register, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	data := resp["data"].(map[string]interface{})
-	if data["access_token"] == nil || data["access_token"] == "" {
-		t.Error("access_token should not be empty")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for duplicate register, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -730,25 +692,8 @@ func TestRegister_VerificationRequired_Reissue(t *testing.T) {
 	req2 := httptest.NewRequest("POST", "/api/v1/auth/register", bytes.NewReader(raw))
 	req2.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w2, req2)
-	if w2.Code != http.StatusCreated {
-		t.Fatalf("expected 201 on re-register, got %d: %s", w2.Code, w2.Body.String())
-	}
-
-	var resp struct {
-		Data struct {
-			VerificationRequired bool   `json:"verification_required"`
-			AccessToken          string `json:"access_token"`
-			RefreshToken         string `json:"refresh_token"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
-		t.Fatal(err)
-	}
-	if !resp.Data.VerificationRequired {
-		t.Fatal("expected verification_required true on re-register")
-	}
-	if resp.Data.AccessToken != "" || resp.Data.RefreshToken != "" {
-		t.Fatal("expected no tokens on re-register")
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("expected 409 on re-register, got %d: %s", w2.Code, w2.Body.String())
 	}
 
 	uid, err := uuid.Parse(userID)
@@ -920,7 +865,7 @@ func TestVerifyEmail_UnknownAndWrongCode_Identical(t *testing.T) {
 	}
 }
 
-func TestRegister_VerifiedUser_ReturnsTokens(t *testing.T) {
+func TestRegister_VerifiedUser_RejectsDuplicate(t *testing.T) {
 	db := setupTestDB(t)
 	r := setupHandlerRouter(db, testConfigWithVerification())
 
@@ -950,24 +895,16 @@ func TestRegister_VerifiedUser_ReturnsTokens(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for existing verified user, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp struct {
-		Data struct {
-			VerificationRequired bool   `json:"verification_required"`
-			AccessToken          string `json:"access_token"`
-			RefreshToken         string `json:"refresh_token"`
-		} `json:"data"`
-	}
+	var resp map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatal(err)
+		t.Fatalf("parse response: %v", err)
 	}
-	if resp.Data.AccessToken == "" || resp.Data.RefreshToken == "" {
-		t.Fatal("expected tokens for verified user")
-	}
-	if resp.Data.VerificationRequired {
-		t.Fatal("expected no verification_required flag for verified user")
+	code, _ := resp["error"].(map[string]any)["code"].(string)
+	if code != "CONFLICT" {
+		t.Fatalf("expected CONFLICT, got %q", code)
 	}
 }
 
@@ -1056,6 +993,11 @@ func TestRecoveryPrefetch(t *testing.T) {
 		KeyType: "dek_wrapped_by_recovery",
 		Payload: "wrapped-recovery-dek",
 	})
+	db.Create(&models.UserKey{
+		UserID:  uid,
+		KeyType: "private_key_wrapped_by_dek",
+		Payload: "wrapped-private-key",
+	})
 
 	body, _ := json.Marshal(gin.H{
 		"recovery_code": base64.RawStdEncoding.EncodeToString([]byte(recoveryCode)),
@@ -1082,6 +1024,9 @@ func TestRecoveryPrefetch(t *testing.T) {
 	}
 	if data["dek_wrapped_by_recovery"] != "wrapped-recovery-dek" {
 		t.Errorf("dek_wrapped_by_recovery: want wrapped-recovery-dek, got %v", data["dek_wrapped_by_recovery"])
+	}
+	if data["private_key_wrapped_by_dek"] != "wrapped-private-key" {
+		t.Errorf("private_key_wrapped_by_dek: want wrapped-private-key, got %v", data["private_key_wrapped_by_dek"])
 	}
 	if data["nonce"] == nil || data["nonce"] == "" {
 		t.Error("nonce should be present")
