@@ -50,7 +50,10 @@ func TestAutoMigrate(t *testing.T) {
 		"oauth_states":   false,
 		"auth_codes":     false,
 		"vaults":         false,
-		"records":        false,
+		"groups":         false,
+		"hosts":          false,
+		"keys":           false,
+		"snippets":       false,
 	}
 
 	for _, table := range tables {
@@ -63,6 +66,10 @@ func TestAutoMigrate(t *testing.T) {
 		if !found {
 			t.Errorf("expected table %s to exist", table)
 		}
+	}
+
+	if db.Migrator().HasTable("records") {
+		t.Errorf("expected obsolete table records to be dropped")
 	}
 }
 
@@ -85,6 +92,15 @@ func TestSeedPersonalVault(t *testing.T) {
 	if vault.Name != "Personal" {
 		t.Errorf("expected vault name 'Personal', got '%s'", vault.Name)
 	}
+	if vault.Revision != 1 || vault.SortOrder != 0 || vault.Data != "{}" {
+		t.Errorf("expected seeded vault to carry the sync envelope, got %+v", vault)
+	}
+	if !vault.IsDefault {
+		t.Errorf("expected seeded vault to be the default, got is_default false")
+	}
+	if vault.DeletedAt != nil {
+		t.Errorf("expected seeded vault to be alive, got deleted_at %v", vault.DeletedAt)
+	}
 
 	err = SeedPersonalVault(db, userID)
 	if err != nil {
@@ -95,6 +111,120 @@ func TestSeedPersonalVault(t *testing.T) {
 	db.Model(&Vault{}).Where("owner_id = ? AND kind = ?", userID, "personal").Count(&count)
 	if count != 1 {
 		t.Errorf("expected exactly 1 personal vault, got %d", count)
+	}
+}
+
+func TestTypedModelsRoundtrip(t *testing.T) {
+	db := setupTestDB(t)
+	if err := AutoMigrate(db); err != nil {
+		t.Fatalf("AutoMigrate failed: %v", err)
+	}
+
+	vaultID := uuid.New()
+	groupID := uuid.New()
+	keyID := uuid.New()
+
+	vault := Vault{
+		ID:        vaultID,
+		OwnerID:   uuid.New(),
+		Revision:  3,
+		Kind:      "personal",
+		Name:      "Personal",
+		SortOrder: 0,
+		Data:      "enc",
+	}
+	if err := db.Create(&vault).Error; err != nil {
+		t.Fatalf("failed to create vault: %v", err)
+	}
+
+	group := Group{
+		ID:        uuid.New(),
+		VaultID:   vaultID,
+		Revision:  1,
+		Name:      "Prod",
+		SortOrder: 0,
+		Data:      "{}",
+	}
+	if err := db.Create(&group).Error; err != nil {
+		t.Fatalf("failed to create group: %v", err)
+	}
+
+	host := Host{
+		ID:        uuid.New(),
+		VaultID:   vaultID,
+		Revision:  1,
+		Name:      "web-01",
+		OS:        "linux",
+		AuthType:  "key",
+		Tags:      "[\"web\",\"prod\"]",
+		Color:     "#3b82f6",
+		GroupID:   &groupID,
+		KeyID:     &keyID,
+		SortOrder: 1,
+		Data:      "enc",
+	}
+	if err := db.Create(&host).Error; err != nil {
+		t.Fatalf("failed to create host: %v", err)
+	}
+
+	key := Key{
+		ID:          keyID,
+		VaultID:     vaultID,
+		Revision:    1,
+		Name:        "work",
+		Description: "GitHub",
+		KeyType:     "ed25519",
+		Fingerprint: "SHA256:abc",
+		PublicKey:   "ssh-ed25519 AAAA",
+		Data:        "enc",
+	}
+	if err := db.Create(&key).Error; err != nil {
+		t.Fatalf("failed to create key: %v", err)
+	}
+
+	snippet := Snippet{
+		ID:          uuid.New(),
+		VaultID:     vaultID,
+		Revision:    1,
+		Name:        "restart nginx",
+		Description: "quick restart",
+		Tags:        "[\"ops\"]",
+		Data:        "enc",
+	}
+	if err := db.Create(&snippet).Error; err != nil {
+		t.Fatalf("failed to create snippet: %v", err)
+	}
+
+	var foundVault Vault
+	if err := db.First(&foundVault, "id = ?", vaultID).Error; err != nil {
+		t.Fatalf("failed to find vault: %v", err)
+	}
+	if foundVault.Revision != 3 || foundVault.Data != "enc" || foundVault.DeletedAt != nil {
+		t.Errorf("vault sync envelope not persisted: %+v", foundVault)
+	}
+
+	var foundHost Host
+	if err := db.First(&foundHost, "vault_id = ?", vaultID).Error; err != nil {
+		t.Fatalf("failed to find host: %v", err)
+	}
+	if foundHost.OS != "linux" || foundHost.AuthType != "key" || foundHost.Tags != "[\"web\",\"prod\"]" {
+		t.Errorf("host whitelist columns not persisted: %+v", foundHost)
+	}
+
+	var foundKey Key
+	if err := db.First(&foundKey, "id = ?", keyID).Error; err != nil {
+		t.Fatalf("failed to find key: %v", err)
+	}
+	if foundKey.KeyType != "ed25519" || foundKey.Fingerprint != "SHA256:abc" || foundKey.PublicKey != "ssh-ed25519 AAAA" {
+		t.Errorf("key whitelist columns not persisted: %+v", foundKey)
+	}
+
+	var foundSnippet Snippet
+	if err := db.First(&foundSnippet, "name = ?", "restart nginx").Error; err != nil {
+		t.Fatalf("failed to find snippet: %v", err)
+	}
+	if foundSnippet.Tags != "[\"ops\"]" {
+		t.Errorf("snippet whitelist columns not persisted: %+v", foundSnippet)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 )
 
 func AutoMigrate(db *gorm.DB) error {
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&User{},
 		&UserKey{},
 		&RefreshToken{},
@@ -16,8 +16,16 @@ func AutoMigrate(db *gorm.DB) error {
 		&AuthCode{},
 		&LoginNonce{},
 		&Vault{},
-		&Record{},
-	)
+		&Group{},
+		&Host{},
+		&Key{},
+		&Snippet{},
+	); err != nil {
+		return err
+	}
+	// The pre-typed-schema `records` table is obsolete; drop it so its data
+	// cannot shadow the typed tables (nothing ever read from it).
+	return db.Migrator().DropTable("records")
 }
 
 func SeedPersonalVault(db *gorm.DB, userID uuid.UUID) error {
@@ -34,6 +42,10 @@ func SeedPersonalVault(db *gorm.DB, userID uuid.UUID) error {
 		OwnerID:   userID,
 		Kind:      "personal",
 		Name:      "Personal",
+		Revision:  1,
+		SortOrder: 0,
+		IsDefault: true,
+		Data:      "{}",
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
