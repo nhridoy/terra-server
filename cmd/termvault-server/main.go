@@ -75,6 +75,7 @@ func main() {
 	protected := r.Group("/api/v1")
 	protected.Use(auth.RateLimit(cfg.RateLimitAPI), auth.JWTMiddleware(cfg))
 	protected.GET("/me", auth.HandleMe(db))
+	protected.GET("/vaults/default", auth.HandleDefaultVault(db))
 	protected.GET("/auth/keyring", auth.HandleKeyring(db))
 	protected.POST("/auth/password-change", auth.HandlePasswordChange(db, cfg))
 	protected.POST("/auth/recovery-material", auth.RateLimit(cfg.RateLimitAuth), auth.HandleAttachRecoveryMaterial(db, cfg))

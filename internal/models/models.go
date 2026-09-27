@@ -30,7 +30,7 @@ func AutoMigrate(db *gorm.DB) error {
 
 func SeedPersonalVault(db *gorm.DB, userID uuid.UUID) error {
 	var count int64
-	if err := db.Model(&Vault{}).Where("owner_id = ? AND kind = ?", userID, "personal").Count(&count).Error; err != nil {
+	if err := db.Model(&Vault{}).Where("owner_id = ? AND kind = ? AND is_default = ? AND deleted_at IS NULL", userID, "personal", true).Count(&count).Error; err != nil {
 		return err
 	}
 	if count > 0 {
