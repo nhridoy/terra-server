@@ -20,12 +20,23 @@ func AutoMigrate(db *gorm.DB) error {
 		&Host{},
 		&Key{},
 		&Snippet{},
+		&Workspace{},
+		&Preset{},
+		&PortForward{},
+		&SyncChange{},
+		&SyncOperation{},
 	); err != nil {
 		return err
 	}
 	// The pre-typed-schema `records` table is obsolete; drop it so its data
 	// cannot shadow the typed tables (nothing ever read from it).
-	return db.Migrator().DropTable("records")
+	if err := db.Migrator().DropTable("records"); err != nil {
+		return err
+	}
+	if err := MigrateTimestamps(db); err != nil {
+		return err
+	}
+	return bootstrapVaultChanges(db)
 }
 
 func SeedPersonalVault(db *gorm.DB, userID uuid.UUID) error {
@@ -46,8 +57,8 @@ func SeedPersonalVault(db *gorm.DB, userID uuid.UUID) error {
 		SortOrder: 0,
 		IsDefault: true,
 		Data:      "{}",
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: CanonicalUTCMillis(time.Now()),
+		UpdatedAt: CanonicalUTCMillis(time.Now()),
 	}
-	return db.Create(&vault).Error
+	return createSeedVault(db, &vault)
 }

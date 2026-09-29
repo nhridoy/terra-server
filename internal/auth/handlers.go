@@ -50,6 +50,7 @@ type keyringPayload struct {
 
 type registerRequest struct {
 	UserID       string         `json:"user_id" binding:"required"`
+	DeviceID     string         `json:"device_id"`
 	Email        string         `json:"email" binding:"required"`
 	FullName     string         `json:"full_name"`
 	PasswordHash string         `json:"password_hash" binding:"required"`
@@ -146,6 +147,12 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid user_id")
 			return
 		}
+		if req.DeviceID != "" {
+			if _, err := uuid.Parse(req.DeviceID); err != nil {
+				Error(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid device_id")
+				return
+			}
+		}
 
 		var existing models.User
 		if db.Where("id = ?", userID).First(&existing).Error == nil ||
@@ -214,13 +221,13 @@ func HandleRegister(db *gorm.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		rt, err := createRefreshToken(db, userID, "", cfg)
+		rt, err := createRefreshToken(db, userID, req.DeviceID, cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create refresh token")
 			return
 		}
 
-		at, err := GenerateAccessToken(userID, "", cfg)
+		at, err := GenerateAccessToken(userID, req.DeviceID, cfg)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate tokens")
 			return
@@ -834,10 +841,10 @@ func HandleRecoveryPrefetch(db *gorm.DB) gin.HandlerFunc {
 				"t": user.KDFT,
 				"p": user.KDFP,
 			},
-			"server_salt":                 deref(user.AuthSalt),
-			"salt_cl":                     deref(user.SaltCL),
-			"dek_wrapped_by_recovery":     uk.Payload,
-			"private_key_wrapped_by_dek":  pk.Payload,
+			"server_salt":                deref(user.AuthSalt),
+			"salt_cl":                    deref(user.SaltCL),
+			"dek_wrapped_by_recovery":    uk.Payload,
+			"private_key_wrapped_by_dek": pk.Payload,
 		})
 	}
 }

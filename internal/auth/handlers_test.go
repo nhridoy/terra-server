@@ -673,6 +673,62 @@ func TestRegister_VerificationOff_ReturnsTokens(t *testing.T) {
 	}
 }
 
+func TestRegister_TokensUseSuppliedDeviceID(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	r := setupHandlerRouter(db, cfg)
+	deviceID := uuid.New().String()
+	body := registerRequestPayload("register-device@example.com", uuid.New().String())
+	body["device_id"] = deviceID
+	raw, _ := json.Marshal(body)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register: %d %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := VerifyAccessToken(resp.Data.AccessToken, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.DeviceID != deviceID {
+		t.Fatalf("access token device: got %q, want %q", claims.DeviceID, deviceID)
+	}
+	refreshRaw, _ := json.Marshal(gin.H{"refresh_token": resp.Data.RefreshToken})
+	refreshReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", bytes.NewReader(refreshRaw))
+	refreshReq.Header.Set("Content-Type", "application/json")
+	refresh := httptest.NewRecorder()
+	r.ServeHTTP(refresh, refreshReq)
+	if refresh.Code != http.StatusOK {
+		t.Fatalf("refresh: %d %s", refresh.Code, refresh.Body.String())
+	}
+	var refreshed struct {
+		Data struct {
+			AccessToken string `json:"access_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(refresh.Body.Bytes(), &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	claims, err = VerifyAccessToken(refreshed.Data.AccessToken, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.DeviceID != deviceID {
+		t.Fatalf("refreshed access token device: got %q, want %q", claims.DeviceID, deviceID)
+	}
+}
+
 func TestRegister_VerificationRequired_Reissue(t *testing.T) {
 	db := setupTestDB(t)
 	r := setupHandlerRouter(db, testConfigWithVerification())
