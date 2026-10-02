@@ -28,6 +28,9 @@ func AutoMigrate(db *gorm.DB) error {
 		&Workspace{},
 		&Preset{},
 		&PortForward{},
+		&SessionHistory{},
+		&SessionOutputChunk{},
+		&SessionPreferences{},
 		&SyncChange{},
 		&SyncOperation{},
 	); err != nil {

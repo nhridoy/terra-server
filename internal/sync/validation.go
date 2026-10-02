@@ -19,14 +19,17 @@ var commonFields = []string{
 }
 
 var tableFields = map[string][]string{
-	"vaults":        {"owner_id", "kind", "is_default"},
-	"groups":        {"parent_id"},
-	"hosts":         {"os", "auth_type", "tags", "color", "group_id", "key_id"},
-	"keys":          {"description", "key_type", "fingerprint", "public_key"},
-	"snippets":      {"description", "tags"},
-	"workspaces":    {},
-	"presets":       {},
-	"port_forwards": {"host_id", "mode"},
+	"vaults":                {"owner_id", "kind", "is_default"},
+	"groups":                {"parent_id"},
+	"hosts":                 {"os", "auth_type", "tags", "color", "group_id", "key_id"},
+	"keys":                  {"description", "key_type", "fingerprint", "public_key"},
+	"snippets":              {"description", "tags"},
+	"workspaces":            {},
+	"presets":               {},
+	"port_forwards":         {"host_id", "mode"},
+	"session_history":       {},
+	"session_output_chunks": {},
+	"session_preferences":   {},
 }
 
 func canonicalTimestamp(value any) bool {
@@ -133,6 +136,13 @@ func validateRecord(table string, record map[string]any, vaultID, deviceID, oper
 		if !allowed[field] {
 			return fmt.Errorf("unexpected plaintext field %q", field)
 		}
+	}
+	if fixed, ok := map[string]string{
+		"session_history": "Session",
+		"session_output_chunks": "Output chunk",
+		"session_preferences": "Session preferences",
+	}[table]; ok && record["name"] != fixed {
+		return errors.New("history name must be non-identifying")
 	}
 	if err := requiredUUID(record, "id", ""); err != nil {
 		return err

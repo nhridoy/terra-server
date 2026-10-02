@@ -45,14 +45,17 @@ func parseLegacyTimestamp(value string) (time.Time, error) {
 // It is safe to rerun after a partial or complete upgrade.
 func MigrateTimestamps(db *gorm.DB) error {
 	tables := map[string][]string{
-		"vaults":        {"created_at", "updated_at", "deleted_at"},
-		"groups":        {"created_at", "updated_at", "deleted_at"},
-		"hosts":         {"created_at", "updated_at", "deleted_at"},
-		"keys":          {"created_at", "updated_at", "deleted_at"},
-		"snippets":      {"created_at", "updated_at", "deleted_at"},
-		"workspaces":    {"created_at", "updated_at", "deleted_at"},
-		"presets":       {"created_at", "updated_at", "deleted_at"},
-		"port_forwards": {"created_at", "updated_at", "deleted_at"},
+		"vaults":                {"created_at", "updated_at", "deleted_at"},
+		"groups":                {"created_at", "updated_at", "deleted_at"},
+		"hosts":                 {"created_at", "updated_at", "deleted_at"},
+		"keys":                  {"created_at", "updated_at", "deleted_at"},
+		"snippets":              {"created_at", "updated_at", "deleted_at"},
+		"workspaces":            {"created_at", "updated_at", "deleted_at"},
+		"presets":               {"created_at", "updated_at", "deleted_at"},
+		"port_forwards":         {"created_at", "updated_at", "deleted_at"},
+		"session_history":       {"created_at", "updated_at", "deleted_at"},
+		"session_output_chunks": {"created_at", "updated_at", "deleted_at"},
+		"session_preferences":   {"created_at", "updated_at", "deleted_at"},
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		for table, columns := range tables {

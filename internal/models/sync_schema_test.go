@@ -14,7 +14,7 @@ func TestSyncSchema(t *testing.T) {
 	if err := AutoMigrate(db); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"workspaces", "presets", "port_forwards", "sync_changes", "sync_operations"} {
+	for _, table := range []string{"workspaces", "presets", "port_forwards", "session_history", "session_output_chunks", "session_preferences", "sync_changes", "sync_operations"} {
 		if !db.Migrator().HasTable(table) {
 			t.Errorf("missing sync table %s", table)
 		}

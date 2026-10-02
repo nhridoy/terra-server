@@ -32,7 +32,7 @@ func syncTestServer(t *testing.T) (*gorm.DB, *gin.Engine, *config.Config, uuid.U
 			t.Fatal(err)
 		}
 	}
-	if err := db.Create(&models.Vault{ID: vaultID, OwnerID: owner, Kind: "personal", Name: "Personal", Data: "{}"}).Error; err != nil {
+	if err := db.Create(&models.Vault{ID: vaultID, OwnerID: owner, Kind: "personal", Name: "Personal", IsDefault: true, Data: "{}"}).Error; err != nil {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{JWTSecret: "sync-test-secret", JWTExpiry: time.Hour}

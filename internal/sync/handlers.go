@@ -29,6 +29,10 @@ func WithMutationBarrier(fn func() error) error {
 var errVaultHasLiveRecords = errors.New("vault still has live records")
 var errVaultDeleted = errors.New("vault is deleted")
 
+func isHistoryTable(table string) bool {
+	return table == "session_history" || table == "session_output_chunks" || table == "session_preferences"
+}
+
 func requestUser(c *gin.Context) (uuid.UUID, bool) {
 	user, ok := c.Get("user_id")
 	if !ok {
@@ -193,7 +197,7 @@ func applyOperation(tx *gorm.DB, vaultID uuid.UUID, operation PushOperation, dev
 		}
 	}
 	if operation.Table == "vaults" && operation.Record["deleted_at"] != nil {
-		for _, table := range []string{"port_forwards", "hosts", "groups", "keys", "snippets", "workspaces", "presets"} {
+		for _, table := range []string{"port_forwards", "hosts", "groups", "keys", "snippets", "workspaces", "presets", "session_history", "session_output_chunks", "session_preferences"} {
 			var count int64
 			if err := tx.Table(table).Where("vault_id = ? AND deleted_at IS NULL", vaultID).Count(&count).Error; err != nil {
 				return PushResult{}, err
@@ -227,7 +231,7 @@ func applyOperation(tx *gorm.DB, vaultID uuid.UUID, operation PushOperation, dev
 		return PushResult{}, err
 	}
 	result := PushResult{OperationID: operation.OperationID}
-	if found && editOrder(existing) >= editOrder(operation.Record) {
+	if found && ((isHistoryTable(operation.Table) && existing["deleted_at"] != nil && operation.Record["deleted_at"] == nil) || editOrder(existing) >= editOrder(operation.Record)) {
 		result.Fate = "superseded"
 		result.CanonicalRecord, err = canonicalWinner(tx, operation.Table, recordID, vaultID)
 		if err != nil {
@@ -360,6 +364,12 @@ func HandlePush(db *gorm.DB) gin.HandlerFunc {
 				}
 			}
 			for _, operation := range request.Operations {
+				if isHistoryTable(operation.Table) {
+					if !exists || vault.TeamID != nil || vault.OwnerID != userID || vault.Kind != "personal" || !vault.IsDefault {
+						status = http.StatusForbidden
+						return errors.New("history requires default personal vault")
+					}
+				}
 				version, epoch, err := payloadVersionAndEpoch(operation.Record["data"])
 				if err != nil {
 					status = http.StatusBadRequest
