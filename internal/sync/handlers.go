@@ -10,12 +10,22 @@ import (
 	"github.com/google/uuid"
 	"github.com/termvault/termvault/internal/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // SQLite writes are serialized so a committed cursor never points past an
 // uncommitted earlier event. The database transaction keeps row/event/ledger
 // updates indivisible.
 var pushMu sync.Mutex
+
+// WithMutationBarrier serializes a team-key cutover with sync pushes in this process.
+// The rotation transaction still uses revision checks for other server instances.
+func WithMutationBarrier(fn func() error) error {
+	pushMu.Lock()
+	defer pushMu.Unlock()
+	return fn()
+}
+
 var errVaultHasLiveRecords = errors.New("vault still has live records")
 var errVaultDeleted = errors.New("vault is deleted")
 
@@ -28,10 +38,45 @@ func requestUser(c *gin.Context) (uuid.UUID, bool) {
 	return id, ok
 }
 
-func ownedVault(tx *gorm.DB, vaultID, userID uuid.UUID) (bool, error) {
-	var count int64
-	err := tx.Model(&models.Vault{}).Where("id = ? AND owner_id = ?", vaultID, userID).Count(&count).Error
-	return count > 0, err
+func accessibleVault(tx *gorm.DB, vaultID, userID uuid.UUID) (models.Vault, bool, bool, error) {
+	var vault models.Vault
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", vaultID).Take(&vault).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return vault, false, false, nil
+	}
+	if err != nil {
+		return vault, false, false, err
+	}
+	if vault.TeamID == nil {
+		return vault, true, vault.OwnerID == userID, nil
+	}
+	if vault.DeletedAt != nil {
+		return vault, true, false, nil
+	}
+	var member models.TeamMember
+	err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("team_id = ? AND user_id = ? AND state = ?", *vault.TeamID, userID, "active").Take(&member).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return vault, true, false, nil
+	}
+	return vault, true, err == nil, err
+}
+
+func payloadVersionAndEpoch(data any) (int, int, error) {
+	raw, ok := data.(string)
+	if !ok {
+		return 0, 0, errors.New("missing ciphertext")
+	}
+	if raw == "{}" {
+		return 0, 0, nil
+	}
+	var payload struct {
+		Version int `json:"v"`
+		Epoch   int `json:"epoch"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return 0, 0, err
+	}
+	return payload.Version, payload.Epoch, nil
 }
 
 func editOrder(record map[string]any) string {
@@ -296,11 +341,11 @@ func HandlePush(db *gorm.DB) gin.HandlerFunc {
 		results := make([]PushResult, 0, len(request.Operations))
 		status := http.StatusInternalServerError
 		err = db.Transaction(func(tx *gorm.DB) error {
-			owned, err := ownedVault(tx, vaultID, userID)
+			vault, exists, allowed, err := accessibleVault(tx, vaultID, userID)
 			if err != nil {
 				return err
 			}
-			if !owned {
+			if !allowed {
 				if len(request.Operations) == 0 || request.Operations[0].Table != "vaults" || request.Operations[0].Record["id"] != request.VaultID {
 					status = http.StatusForbidden
 					return errors.New("vault not owned")
@@ -315,6 +360,28 @@ func HandlePush(db *gorm.DB) gin.HandlerFunc {
 				}
 			}
 			for _, operation := range request.Operations {
+				version, epoch, err := payloadVersionAndEpoch(operation.Record["data"])
+				if err != nil {
+					status = http.StatusBadRequest
+					return err
+				}
+				if exists && vault.TeamID != nil {
+					if operation.Table == "vaults" {
+						status = http.StatusForbidden
+						return errors.New("team vault metadata requires team endpoint")
+					}
+					if vault.RotationState != "ready" {
+						status = http.StatusConflict
+						return errors.New("team vault rotation required")
+					}
+					if version != 2 || epoch != vault.KeyEpoch {
+						status = http.StatusConflict
+						return errors.New("team vault key epoch mismatch")
+					}
+				} else if version == 2 {
+					status = http.StatusBadRequest
+					return errors.New("team ciphertext in private vault")
+				}
 				if err := validateRelationships(tx, vaultID, operation, pending); err != nil {
 					status = http.StatusBadRequest
 					return err
@@ -355,13 +422,21 @@ func HandlePull(db *gorm.DB) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid vault ID"})
 			return
 		}
-		owned, err := ownedVault(db, vaultID, userID)
+		pushMu.Lock()
+		defer pushMu.Unlock()
+		tx := db.Begin()
+		if tx.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "pull transaction failed"})
+			return
+		}
+		defer tx.Rollback()
+		vault, _, allowed, err := accessibleVault(tx, vaultID, userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "authorization failed"})
 			return
 		}
-		if !owned {
-			c.JSON(http.StatusForbidden, gin.H{"error": "vault not owned"})
+		if !allowed {
+			c.JSON(http.StatusForbidden, gin.H{"error": "vault access denied"})
 			return
 		}
 		limit := request.Limit
@@ -372,12 +447,18 @@ func HandlePull(db *gorm.DB) gin.HandlerFunc {
 			limit = 100
 		}
 		var upper uint64
-		if err := db.Model(&models.SyncChange{}).Select("COALESCE(MAX(seq), 0)").Scan(&upper).Error; err != nil {
+		if err := tx.Model(&models.SyncChange{}).Select("COALESCE(MAX(seq), 0)").Scan(&upper).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "cursor lookup failed"})
 			return
 		}
+		afterCursor := request.AfterCursor
+		reset := false
+		if vault.TeamID != nil && vault.RotationCursor > 0 && afterCursor < vault.RotationCursor {
+			afterCursor = vault.RotationCursor - 1
+			reset = true
+		}
 		var events []models.SyncChange
-		if err := db.Where("vault_id = ? AND seq > ? AND seq <= ?", vaultID, request.AfterCursor, upper).Order("seq ASC").Limit(limit + 1).Find(&events).Error; err != nil {
+		if err := tx.Where("vault_id = ? AND seq > ? AND seq <= ?", vaultID, afterCursor, upper).Order("seq ASC").Limit(limit + 1).Find(&events).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "pull failed"})
 			return
 		}
@@ -385,7 +466,7 @@ func HandlePull(db *gorm.DB) gin.HandlerFunc {
 		if hasMore {
 			events = events[:limit]
 		}
-		response := PullResponse{Changes: make([]PullChange, 0, len(events)), NextCursor: request.AfterCursor, UpperCursor: upper, HasMore: hasMore}
+		response := PullResponse{Reset: reset, RotationCursor: vault.RotationCursor, Changes: make([]PullChange, 0, len(events)), NextCursor: request.AfterCursor, UpperCursor: upper, HasMore: hasMore}
 		for _, event := range events {
 			var record map[string]any
 			if err := json.Unmarshal([]byte(event.Envelope), &record); err != nil {
@@ -397,6 +478,10 @@ func HandlePull(db *gorm.DB) gin.HandlerFunc {
 		}
 		if !hasMore {
 			response.NextCursor = upper
+		}
+		if err := tx.Commit().Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "pull transaction failed"})
+			return
 		}
 		c.JSON(http.StatusOK, response)
 	}

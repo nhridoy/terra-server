@@ -12,6 +12,7 @@ import (
 	"github.com/termvault/termvault/internal/config"
 	"github.com/termvault/termvault/internal/models"
 	syncapi "github.com/termvault/termvault/internal/sync"
+	"github.com/termvault/termvault/internal/teams"
 	"gorm.io/gorm"
 )
 
@@ -82,6 +83,7 @@ func main() {
 	protected.POST("/auth/recovery-material", auth.RateLimit(cfg.RateLimitAuth), auth.HandleAttachRecoveryMaterial(db, cfg))
 	protected.POST("/sync/push", syncapi.HandlePush(db))
 	protected.POST("/sync/pull", syncapi.HandlePull(db))
+	teams.RegisterRoutes(protected, db)
 
 	addr := cfg.Host + ":" + cfg.Port
 

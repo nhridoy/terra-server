@@ -71,16 +71,33 @@ func validateCiphertext(table string, value any) error {
 		return nil
 	}
 	var payload struct {
-		Version int    `json:"v"`
-		Alg     string `json:"alg"`
-		Nonce   string `json:"nonce"`
-		CT      string `json:"ct"`
-		AAD     string `json:"aad"`
+		Version    int    `json:"v"`
+		Alg        string `json:"alg"`
+		Nonce      string `json:"nonce"`
+		CT         string `json:"ct"`
+		AAD        string `json:"aad"`
+		VaultID    string `json:"vault_id"`
+		Epoch      int    `json:"epoch"`
+		RecordType string `json:"record_type"`
 	}
 	if err := json.Unmarshal([]byte(s), &payload); err != nil {
 		return errors.New("invalid ciphertext envelope")
 	}
-	if payload.Version != 1 || payload.Alg != "xchacha20poly1305" || (payload.AAD != base64.RawStdEncoding.EncodeToString([]byte(table)) && payload.AAD != base64.StdEncoding.EncodeToString([]byte(table))) {
+	if payload.Alg != "xchacha20poly1305" {
+		return errors.New("unsupported ciphertext envelope")
+	}
+	if payload.Version == 1 {
+		if payload.AAD != base64.RawStdEncoding.EncodeToString([]byte(table)) && payload.AAD != base64.StdEncoding.EncodeToString([]byte(table)) {
+			return errors.New("unsupported ciphertext envelope")
+		}
+	} else if payload.Version == 2 {
+		if payload.RecordType != table || payload.Epoch < 1 {
+			return errors.New("invalid team ciphertext context")
+		}
+		if _, err := uuid.Parse(payload.VaultID); err != nil {
+			return errors.New("invalid team ciphertext vault")
+		}
+	} else {
 		return errors.New("unsupported ciphertext envelope")
 	}
 	nonce, err := decodeBase64(payload.Nonce)
@@ -144,5 +161,20 @@ func validateRecord(table string, record map[string]any, vaultID, deviceID, oper
 	if value, exists := record["deleted_at"]; exists && value != nil && !canonicalTimestamp(value) {
 		return errors.New("deleted_at must be canonical UTC milliseconds")
 	}
-	return validateCiphertext(table, record["data"])
+	if err := validateCiphertext(table, record["data"]); err != nil {
+		return err
+	}
+	if data, ok := record["data"].(string); ok && data != "{}" {
+		var context struct {
+			Version int    `json:"v"`
+			VaultID string `json:"vault_id"`
+		}
+		if err := json.Unmarshal([]byte(data), &context); err != nil {
+			return errors.New("invalid ciphertext envelope")
+		}
+		if context.Version == 2 && context.VaultID != vaultID {
+			return errors.New("team ciphertext vault mismatch")
+		}
+	}
+	return nil
 }

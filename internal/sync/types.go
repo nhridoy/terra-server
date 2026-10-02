@@ -32,8 +32,10 @@ type PullChange struct {
 }
 
 type PullResponse struct {
-	Changes     []PullChange `json:"changes"`
-	NextCursor  uint64       `json:"next_cursor"`
-	UpperCursor uint64       `json:"upper_cursor"`
-	HasMore     bool         `json:"has_more"`
+	Reset          bool         `json:"reset"`
+	RotationCursor uint64       `json:"rotation_cursor"`
+	Changes        []PullChange `json:"changes"`
+	NextCursor     uint64       `json:"next_cursor"`
+	UpperCursor    uint64       `json:"upper_cursor"`
+	HasMore        bool         `json:"has_more"`
 }
