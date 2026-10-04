@@ -44,9 +44,9 @@ func Load() *Config {
 	rateLimitAPI := 30
 
 	cfg := &Config{
-		Port:               getEnvWithLegacy("TERRA_PORT", "TERMVAULT_PORT", "8080"),
-		Host:               getEnvWithLegacy("TERRA_HOST", "TERMVAULT_HOST", "0.0.0.0"),
-		DatabaseURL:        getEnv("DATABASE_URL", "sqlite://termvault.db"),
+		Port:               getEnv("TERRA_PORT", "8080"),
+		Host:               getEnv("TERRA_HOST", "0.0.0.0"),
+		DatabaseURL:        getEnv("DATABASE_URL", "sqlite://terra.db"),
 		JWTSecret:          os.Getenv("JWT_SECRET"),
 		JWTExpiry:          parseDuration(getEnv("JWT_EXPIRY", "15m")),
 		RefreshTokenExpiry: parseDuration(getEnv("REFRESH_TOKEN_EXPIRY", "720h")),
@@ -56,7 +56,7 @@ func Load() *Config {
 		OAuthGitHubID:      os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
 		OAuthGitHubSecret:  os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
 		OAuthRedirectBase:  getEnv("OAUTH_REDIRECT_BASE", getEnv("BASE_URL", "http://localhost:8080")),
-		AppScheme:          getEnvWithLegacy("TERRA_APP_SCHEME", "APP_SCHEME", "terra"),
+		AppScheme:          getEnv("TERRA_APP_SCHEME", "terra"),
 		RateLimitAuth:      rateLimitAuth,
 		RateLimitAPI:       rateLimitAPI,
 	}
@@ -115,7 +115,7 @@ func Load() *Config {
 		"http://127.0.0.1:1422/oauth/callback",
 		"http://127.0.0.1:1423/oauth/callback",
 	}
-	if v := getEnvWithLegacy("TERRA_OAUTH_REDIRECT_URIS", "TERMVAULT_OAUTH_REDIRECT_URIS", ""); v != "" {
+	if v := getEnv("TERRA_OAUTH_REDIRECT_URIS", ""); v != "" {
 		cfg.OAuthRedirectURIs = nil
 		for _, uri := range strings.Split(v, ",") {
 			uri = strings.TrimSpace(uri)
@@ -130,16 +130,6 @@ func Load() *Config {
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func getEnvWithLegacy(key, legacyKey, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	if v := os.Getenv(legacyKey); v != "" {
 		return v
 	}
 	return fallback

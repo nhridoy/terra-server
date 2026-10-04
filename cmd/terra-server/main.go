@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gin-gonic/gin"
@@ -29,11 +30,11 @@ func main() {
 	var db *gorm.DB
 	var err error
 
-	if cfg.DatabaseURL == "" || cfg.DatabaseURL == "sqlite://termvault.db" {
-		db, err = gorm.Open(gormsqlite.Open("termvault.db"), &gorm.Config{})
-	} else {
-		db, err = gorm.Open(gormsqlite.Open(cfg.DatabaseURL), &gorm.Config{})
+	databaseDSN := cfg.DatabaseURL
+	if strings.HasPrefix(databaseDSN, "sqlite://") {
+		databaseDSN = strings.TrimPrefix(databaseDSN, "sqlite://")
 	}
+	db, err = gorm.Open(gormsqlite.Open(databaseDSN), &gorm.Config{})
 
 	if err != nil {
 		slog.Error("failed to connect database", "error", err)
