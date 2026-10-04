@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/termvault/termvault/internal/models"
+	"github.com/nhridoy/terra-server/internal/models"
 )
 
 func historyRecord(table string, vaultID, deviceID, operationID uuid.UUID) map[string]any {
@@ -82,13 +82,17 @@ func TestHistoryTombstoneWinsOverLateLiveUpdate(t *testing.T) {
 		return syncRequest(t, router, cfg, owner, deviceID, "/api/v1/sync/push", map[string]any{"vault_id": vaultID.String(), "device_id": deviceID.String(), "operations": []any{map[string]any{"operation_id": record["operation_id"], "table": "session_history", "record": record}}})
 	}
 	live := historyRecord("session_history", vaultID, deviceID, uuid.New())
-	if got := push(live); got.Code != http.StatusOK { t.Fatalf("live: %d %s", got.Code, got.Body.String()) }
+	if got := push(live); got.Code != http.StatusOK {
+		t.Fatalf("live: %d %s", got.Code, got.Body.String())
+	}
 	deleted := historyRecord("session_history", vaultID, deviceID, uuid.New())
 	deleted["id"] = live["id"]
 	deleted["edited_at"] = "2026-10-02T00:00:01.000Z"
 	deleted["updated_at"] = deleted["edited_at"]
 	deleted["deleted_at"] = deleted["edited_at"]
-	if got := push(deleted); got.Code != http.StatusOK { t.Fatalf("delete: %d %s", got.Code, got.Body.String()) }
+	if got := push(deleted); got.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", got.Code, got.Body.String())
+	}
 	late := historyRecord("session_history", vaultID, deviceID, uuid.New())
 	late["id"] = live["id"]
 	late["edited_at"] = "2026-10-02T00:00:02.000Z"

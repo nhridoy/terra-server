@@ -138,9 +138,9 @@ func validateRecord(table string, record map[string]any, vaultID, deviceID, oper
 		}
 	}
 	if fixed, ok := map[string]string{
-		"session_history": "Session",
+		"session_history":       "Session",
 		"session_output_chunks": "Output chunk",
-		"session_preferences": "Session preferences",
+		"session_preferences":   "Session preferences",
 	}[table]; ok && record["name"] != fixed {
 		return errors.New("history name must be non-identifying")
 	}

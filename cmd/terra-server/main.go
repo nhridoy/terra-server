@@ -8,11 +8,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gormsqlite "github.com/glebarez/sqlite"
-	"github.com/termvault/termvault/internal/auth"
-	"github.com/termvault/termvault/internal/config"
-	"github.com/termvault/termvault/internal/models"
-	syncapi "github.com/termvault/termvault/internal/sync"
-	"github.com/termvault/termvault/internal/teams"
+	"github.com/nhridoy/terra-server/internal/auth"
+	"github.com/nhridoy/terra-server/internal/config"
+	"github.com/nhridoy/terra-server/internal/models"
+	syncapi "github.com/nhridoy/terra-server/internal/sync"
+	"github.com/nhridoy/terra-server/internal/teams"
 	"gorm.io/gorm"
 )
 
@@ -56,7 +56,7 @@ func main() {
 	}
 
 	r.GET("/", func(c *gin.Context) {
-		c.JSON(200, gin.H{"message": "TermVault API"})
+		c.JSON(200, gin.H{"message": "Terra API"})
 	})
 
 	apiAuth := r.Group("/api/v1/auth")

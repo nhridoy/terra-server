@@ -15,8 +15,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/termvault/termvault/internal/config"
-	"github.com/termvault/termvault/internal/models"
+	"github.com/nhridoy/terra-server/internal/config"
+	"github.com/nhridoy/terra-server/internal/models"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"gorm.io/gorm"

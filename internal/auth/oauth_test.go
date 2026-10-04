@@ -12,8 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/termvault/termvault/internal/config"
-	"github.com/termvault/termvault/internal/models"
+	"github.com/nhridoy/terra-server/internal/config"
+	"github.com/nhridoy/terra-server/internal/models"
 	"gorm.io/gorm"
 )
 
@@ -27,7 +27,7 @@ func oauthTestConfig() *config.Config {
 		OAuthGitHubID:      "github-client-id",
 		OAuthGitHubSecret:  "github-client-secret",
 		OAuthRedirectBase:  "http://localhost:8080",
-		AppScheme:          "termvault",
+		AppScheme:          "terra",
 		OAuthRedirectURIs: []string{
 			"http://127.0.0.1:1421/oauth/callback",
 			"http://127.0.0.1:1422/oauth/callback",
@@ -331,7 +331,7 @@ func TestOAuthCallback_RedirectsToStoredAppCallback(t *testing.T) {
 	if !contains(location, "state_already_used") {
 		t.Errorf("expected state_already_used, got: %s", location)
 	}
-	if contains(location, "termvault://") {
+	if contains(location, "terra://") {
 		t.Errorf("expected loopback redirect, not app scheme, got: %s", location)
 	}
 }

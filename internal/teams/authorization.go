@@ -4,7 +4,7 @@ import (
 	"errors"
 
 	"github.com/google/uuid"
-	"github.com/termvault/termvault/internal/models"
+	"github.com/nhridoy/terra-server/internal/models"
 	"gorm.io/gorm"
 )
 

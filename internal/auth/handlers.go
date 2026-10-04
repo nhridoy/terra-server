@@ -12,9 +12,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/termvault/termvault/internal/config"
-	"github.com/termvault/termvault/internal/email"
-	"github.com/termvault/termvault/internal/models"
+	"github.com/nhridoy/terra-server/internal/config"
+	"github.com/nhridoy/terra-server/internal/email"
+	"github.com/nhridoy/terra-server/internal/models"
 	"gorm.io/gorm"
 )
 

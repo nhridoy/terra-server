@@ -5,13 +5,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/termvault/termvault/internal/config"
+	"github.com/nhridoy/terra-server/internal/config"
 )
 
 func TestGenerateAccessToken(t *testing.T) {
 	cfg := &config.Config{
-		JWTSecret:         "test-secret",
-		JWTExpiry:         15 * time.Minute,
+		JWTSecret:          "test-secret",
+		JWTExpiry:          15 * time.Minute,
 		RefreshTokenExpiry: 30 * 24 * time.Hour,
 	}
 	userID := uuid.New()
@@ -27,8 +27,8 @@ func TestGenerateAccessToken(t *testing.T) {
 
 func TestVerifyAccessToken(t *testing.T) {
 	cfg := &config.Config{
-		JWTSecret:         "test-secret",
-		JWTExpiry:         15 * time.Minute,
+		JWTSecret:          "test-secret",
+		JWTExpiry:          15 * time.Minute,
 		RefreshTokenExpiry: 30 * 24 * time.Hour,
 	}
 	userID := uuid.New()
@@ -51,8 +51,8 @@ func TestVerifyAccessToken(t *testing.T) {
 
 func TestVerifyAccessTokenExpired(t *testing.T) {
 	cfg := &config.Config{
-		JWTSecret:         "test-secret",
-		JWTExpiry:         -1 * time.Hour, // already expired
+		JWTSecret:          "test-secret",
+		JWTExpiry:          -1 * time.Hour, // already expired
 		RefreshTokenExpiry: 30 * 24 * time.Hour,
 	}
 	userID := uuid.New()

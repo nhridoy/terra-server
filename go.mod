@@ -1,4 +1,4 @@
-module github.com/termvault/termvault
+module github.com/nhridoy/terra-server
 
 go 1.26.5
 

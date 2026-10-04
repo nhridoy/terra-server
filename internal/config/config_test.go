@@ -117,3 +117,64 @@ func TestLoadEnvOverrides(t *testing.T) {
 		t.Errorf("expected 2 trusted proxies, got %d", len(cfg.TrustedProxies))
 	}
 }
+
+func TestLoadTerraEnvOverridesLegacyValues(t *testing.T) {
+	clearIdentityEnv(t)
+	t.Setenv("TERRA_PORT", "9091")
+	t.Setenv("TERMVAULT_PORT", "9092")
+	t.Setenv("TERRA_HOST", "127.0.0.2")
+	t.Setenv("TERMVAULT_HOST", "127.0.0.3")
+	t.Setenv("TERRA_APP_SCHEME", "terra")
+	t.Setenv("APP_SCHEME", "old-scheme")
+	t.Setenv("TERRA_OAUTH_REDIRECT_URIS", "http://127.0.0.1:1425/oauth/callback")
+	t.Setenv("TERMVAULT_OAUTH_REDIRECT_URIS", "http://127.0.0.1:1426/oauth/callback")
+
+	cfg := Load()
+	if cfg.Port != "9091" || cfg.Host != "127.0.0.2" || cfg.AppScheme != "terra" {
+		t.Fatalf("Terra variables must take precedence: port=%q host=%q scheme=%q", cfg.Port, cfg.Host, cfg.AppScheme)
+	}
+	if len(cfg.OAuthRedirectURIs) != 1 || cfg.OAuthRedirectURIs[0] != "http://127.0.0.1:1425/oauth/callback" {
+		t.Fatalf("Terra OAuth callbacks must take precedence: %v", cfg.OAuthRedirectURIs)
+	}
+}
+
+func TestLoadLegacyIdentityEnvFallbacks(t *testing.T) {
+	clearIdentityEnv(t)
+	t.Setenv("TERMVAULT_PORT", "9092")
+	t.Setenv("TERMVAULT_HOST", "127.0.0.3")
+	t.Setenv("APP_SCHEME", "legacy-app")
+	t.Setenv("TERMVAULT_OAUTH_REDIRECT_URIS", "http://127.0.0.1:1426/oauth/callback")
+
+	cfg := Load()
+	if cfg.Port != "9092" || cfg.Host != "127.0.0.3" || cfg.AppScheme != "legacy-app" {
+		t.Fatalf("legacy environment aliases must remain supported: port=%q host=%q scheme=%q", cfg.Port, cfg.Host, cfg.AppScheme)
+	}
+	if len(cfg.OAuthRedirectURIs) != 1 || cfg.OAuthRedirectURIs[0] != "http://127.0.0.1:1426/oauth/callback" {
+		t.Fatalf("legacy OAuth callback alias must remain supported: %v", cfg.OAuthRedirectURIs)
+	}
+}
+
+func TestLoadTerraIdentityEnvDefaults(t *testing.T) {
+	clearIdentityEnv(t)
+	cfg := Load()
+	if cfg.Port != "8080" || cfg.Host != "0.0.0.0" || cfg.AppScheme != "terra" {
+		t.Fatalf("unexpected Terra defaults: port=%q host=%q scheme=%q", cfg.Port, cfg.Host, cfg.AppScheme)
+	}
+	if cfg.DatabaseURL != "sqlite://termvault.db" {
+		t.Fatalf("server database default must remain compatible, got %q", cfg.DatabaseURL)
+	}
+	if len(cfg.OAuthRedirectURIs) != 3 || cfg.OAuthRedirectURIs[0] != "http://127.0.0.1:1421/oauth/callback" {
+		t.Fatalf("unexpected loopback OAuth defaults: %v", cfg.OAuthRedirectURIs)
+	}
+}
+
+func clearIdentityEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"TERRA_PORT", "TERMVAULT_PORT", "TERRA_HOST", "TERMVAULT_HOST",
+		"TERRA_APP_SCHEME", "APP_SCHEME", "TERRA_OAUTH_REDIRECT_URIS",
+		"TERMVAULT_OAUTH_REDIRECT_URIS",
+	} {
+		t.Setenv(key, "")
+	}
+}

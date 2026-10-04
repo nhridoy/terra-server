@@ -9,7 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/termvault/termvault/internal/config"
+	"github.com/nhridoy/terra-server/internal/config"
 )
 
 func init() {
@@ -113,8 +113,8 @@ func TestJWTMiddleware_InvalidToken(t *testing.T) {
 
 func TestJWTMiddleware_ExpiredToken(t *testing.T) {
 	cfg := &config.Config{
-		JWTSecret:         "test-secret",
-		JWTExpiry:         -1 * time.Hour,
+		JWTSecret:          "test-secret",
+		JWTExpiry:          -1 * time.Hour,
 		RefreshTokenExpiry: 30 * 24 * time.Hour,
 	}
 	userID := uuid.New()
@@ -139,8 +139,8 @@ func TestJWTMiddleware_ExpiredToken(t *testing.T) {
 
 func TestJWTMiddleware_ValidToken(t *testing.T) {
 	cfg := &config.Config{
-		JWTSecret:         "test-secret",
-		JWTExpiry:         15 * time.Minute,
+		JWTSecret:          "test-secret",
+		JWTExpiry:          15 * time.Minute,
 		RefreshTokenExpiry: 30 * 24 * time.Hour,
 	}
 	userID := uuid.New()

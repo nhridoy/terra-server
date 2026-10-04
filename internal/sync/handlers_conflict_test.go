@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/termvault/termvault/internal/models"
+	"github.com/nhridoy/terra-server/internal/models"
 )
 
 func TestPushConflictAndPagination(t *testing.T) {

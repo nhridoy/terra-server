@@ -11,8 +11,8 @@ import (
 	"github.com/gin-gonic/gin"
 	gormsqlite "github.com/glebarez/sqlite"
 	"github.com/google/uuid"
-	"github.com/termvault/termvault/internal/models"
-	teamsync "github.com/termvault/termvault/internal/sync"
+	"github.com/nhridoy/terra-server/internal/models"
+	teamsync "github.com/nhridoy/terra-server/internal/sync"
 	"gorm.io/gorm"
 )
 
